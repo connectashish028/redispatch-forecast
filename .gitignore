@@ -22,8 +22,14 @@ Thumbs.db
 # --- Project data ---
 # Raw parquets are big and re-fetchable; do not commit
 data/raw/
-data/external/
-data/processed/
+# Use /* so git descends into these and the ! exceptions below take effect
+data/external/*
+data/processed/*
+
+# Exception: the small processed files the v1 dashboard needs to start cold
+!data/external/towns_geo.parquet
+!data/processed/ts_15min_wide.parquet
+!data/processed/ts_15min_long.parquet
 
 # Trained models can be regenerated from src/train.py
 models/
