@@ -1,0 +1,40 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.ipynb_checkpoints/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# IDEs / agent tooling
+.vscode/
+.idea/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# --- Project data ---
+# Raw parquets are big and re-fetchable; do not commit
+data/raw/
+data/external/
+data/processed/
+
+# Trained models can be regenerated from src/train.py
+models/
+
+# Daily prediction outputs (regenerable from src/score_today.py)
+data/predictions/
+
+# Loose artifacts dropped at the project root by older runs
+/ts_15min*.parquet
+/redispatch_map.html
+/redispatch_animation.html
+
+# Jupyter outputs (keep notebooks lean)
+*-checkpoint.ipynb

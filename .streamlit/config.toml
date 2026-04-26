@@ -1,0 +1,16 @@
+# Framer-inspired dark theme.
+# Streamlit reads this on startup; restart the app to see changes.
+
+[theme]
+base                       = "dark"
+primaryColor               = "#0099ff"          # Framer Blue
+backgroundColor            = "#000000"          # Pure black canvas
+secondaryBackgroundColor   = "#0a0a0a"          # Near-black elevated surface
+textColor                  = "#ffffff"
+font                       = "sans serif"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
