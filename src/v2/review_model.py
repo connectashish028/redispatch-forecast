@@ -18,7 +18,7 @@ import lightgbm as lgb
 import joblib
 from sklearn.metrics import average_precision_score, brier_score_loss
 
-ROOT       = Path(__file__).resolve().parents[1]
+ROOT       = Path(__file__).resolve().parents[2]
 FEAT       = ROOT / 'data' / 'processed' / 'features.parquet'
 MODELS_DIR = ROOT / 'models'
 HORIZONS   = ['y_1h', 'y_6h', 'y_24h']

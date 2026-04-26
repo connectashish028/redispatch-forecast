@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 
-ROOT       = Path(__file__).resolve().parents[1]
+ROOT       = Path(__file__).resolve().parents[2]
 FEAT       = ROOT / 'data' / 'processed' / 'features.parquet'
 MODELS_DIR = ROOT / 'models'
 

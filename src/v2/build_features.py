@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT      = Path(__file__).resolve().parents[1]
+ROOT      = Path(__file__).resolve().parents[2]
 WIDE_IN   = ROOT / 'data' / 'processed' / 'ts_15min_wide.parquet'
 EXT_IN    = ROOT / 'data' / 'external'  / 'smard_weather_2024_to_mar2026.parquet'
 GEO_IN    = ROOT / 'data' / 'external'  / 'towns_geo.parquet'

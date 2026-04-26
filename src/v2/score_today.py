@@ -43,7 +43,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT       = Path(__file__).resolve().parents[1]
+ROOT       = Path(__file__).resolve().parents[2]
 FEAT       = ROOT / 'data' / 'processed' / 'features.parquet'
 GEO        = ROOT / 'data' / 'external'  / 'towns_geo.parquet'
 MODELS_DIR = ROOT / 'models'

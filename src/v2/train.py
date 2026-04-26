@@ -35,7 +35,7 @@ from sklearn.metrics import (
 )
 from sklearn.isotonic import IsotonicRegression
 
-ROOT       = Path(__file__).resolve().parents[1]
+ROOT       = Path(__file__).resolve().parents[2]
 FEAT       = ROOT / 'data' / 'processed' / 'features.parquet'
 MODELS_DIR = ROOT / 'models'
 MODELS_DIR.mkdir(exist_ok=True)

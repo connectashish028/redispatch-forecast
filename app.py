@@ -1,5 +1,8 @@
 """
-Redispatch Forecast — operator-grade dashboard with Framer-inspired dark theme.
+Redispatch Visualization Dashboard (v1) - SHN Schleswig-Holstein.
+
+Pure historical visualization: no model predictions. For any day in the data
+window, see which substations had redispatch and for how many hours.
 
 Run from project root:
     streamlit run app.py
@@ -19,16 +22,13 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'src'))
 
-import predict as P                                            # noqa: E402
-from labels import (HORIZON_LABEL, HORIZON_DESCRIPTION,        # noqa: E402
-                    METRIC_HELP, pretty)
-from theme import (inject_css, register_plotly_template,       # noqa: E402
+from theme import (inject_css, register_plotly_template,        # noqa: E402
                    COLOR_BG, COLOR_SURFACE, COLOR_TEXT,
                    COLOR_TEXT_MUTED, COLOR_ACCENT,
                    COLOR_RING, HEAT_SCALE)
 
 st.set_page_config(
-    page_title='Redispatch Forecast — SHN',
+    page_title='Redispatch Visualization - SHN',
     page_icon='⚡',
     layout='wide',
     initial_sidebar_state='collapsed',
@@ -36,129 +36,192 @@ st.set_page_config(
 inject_css(st)
 register_plotly_template()
 
-UTC_OFFSET_HOURS = 1   # CET = UTC+1; CEST = UTC+2 — close enough for an operator readout
-LOW_DATA_THRESHOLD = 5  # towns with <= this many positives in test treated as low-confidence
+WIDE_PATH = ROOT / 'data' / 'processed' / 'ts_15min_wide.parquet'
+LONG_PATH = ROOT / 'data' / 'processed' / 'ts_15min_long.parquet'
+GEO_PATH  = ROOT / 'data' / 'external'  / 'towns_geo.parquet'
+
 
 # ---------------------- caches ----------------------
 @st.cache_resource
-def load_pipeline():
-    P._load()
-    return P._FEATURES, P._MODELS, P._CALS, P._FCOLS
+def load_data() -> dict:
+    """Load wide (15-min × town) + long (with reasons) + geo. Returns a dict."""
+    wide = pd.read_parquet(WIDE_PATH)                 # 15-min × town int counts
+    long = pd.read_parquet(LONG_PATH) if LONG_PATH.exists() else None
+    geo  = pd.read_parquet(GEO_PATH).dropna(subset=['lat', 'lon'])
+    return {'wide': wide, 'long': long, 'geo': geo}
 
 
-@st.cache_resource
-def load_geo():
-    return pd.read_parquet(ROOT / 'data/external/towns_geo.parquet').dropna(subset=['lat', 'lon'])
-
-
-@st.cache_data(show_spinner='Forecasting all towns for this date…')
-def forecast_grid(date_str: str) -> pd.DataFrame:
-    feats, models, cals, fcols = load_pipeline()
-    d = pd.Timestamp(date_str).normalize()
-    sub = feats[(feats['ts'] >= d) & (feats['ts'] < d + pd.Timedelta(days=1))].copy()
-    if sub.empty:
+@st.cache_data
+def daily_hours(date_str: str) -> pd.DataFrame:
+    """For one date, return per-town daily metrics:
+        active_hours        - hours with at least one redispatch op (0-24)
+        active_15min_slots  - same in 15-min slots (0-96)
+        n_events            - number of distinct redispatch operations starting that day
+        peak_concurrency    - max simultaneous active ops at any 15-min slot
+        dominant_reason     - most common reason that day (Netzengpass / Netzengpass I)
+    """
+    d   = pd.Timestamp(date_str).normalize()
+    nxt = d + pd.Timedelta(days=1)
+    data = load_data()
+    wide = data['wide']
+    day  = wide.loc[(wide.index >= d) & (wide.index < nxt)]
+    if day.empty:
         return pd.DataFrame()
 
-    X = sub[fcols].values
-    out = sub[['ts', 'town']].reset_index(drop=True)
-    out['hour'] = out['ts'].dt.hour
-    for h in P.HORIZONS:
-        raw = models[h].predict(X)
-        cal = cals[h].predict(raw)
-        out[f'p_{h.split("_")[1]}'] = cal
-        if h in sub.columns:
-            out[h] = sub[h].values
+    # active 15-min slots, peak concurrency
+    is_active = (day > 0).astype('int8')
+    active_slots    = is_active.sum(axis=0).rename('active_15min_slots')
+    peak_concurrent = day.max(axis=0).rename('peak_concurrency')
 
-    g = load_geo()[['town', 'lat', 'lon']]
-    out = out.merge(g, on='town', how='left').dropna(subset=['lat', 'lon'])
+    # active hours — count distinct hours (96 slots / 4 = 24 hours)
+    hourly = is_active.copy()
+    hourly.index = hourly.index.floor('h')
+    hours = hourly.groupby(level=0).max().sum(axis=0).rename('active_hours')
+
+    # event count = total positive jumps in the concurrency signal during the day
+    # (rising edges in `day` count distinct new ops; ops already active at the
+    # start of the day count as 'overlapping' starts via the fill_value=0 prior).
+    deltas = day.astype('int16').diff().fillna(day.astype('int16').iloc[0])
+    n_events = deltas.clip(lower=0).sum(axis=0).astype('int32').rename('n_events')
+
+    out = pd.concat([active_slots, hours, peak_concurrent, n_events], axis=1)
+    out.index.name = 'town'
+    out = out.reset_index()
+
+    # dominant reason from the long form (if available)
+    long = data['long']
+    if long is not None:
+        sub = long[(long['ts'] >= d) & (long['ts'] < nxt)]
+        if not sub.empty:
+            n_i = sub.groupby('town')['n_netzengpass_i'].sum()
+            n_n = sub.groupby('town')['n_netzengpass'].sum()
+            reason = pd.Series(np.where(n_i >= n_n, 'Netzengpass I', 'Netzengpass'),
+                               index=n_i.index, name='dominant_reason')
+            out = out.merge(reason.reset_index(), on='town', how='left')
+    if 'dominant_reason' not in out.columns:
+        out['dominant_reason'] = pd.NA
+
+    out = out.merge(data['geo'][['town', 'lat', 'lon']], on='town', how='left')
     return out
 
 
 @st.cache_data
-def low_data_towns() -> set[str]:
-    """Towns with too few positives in the test window to trust their per-town forecast."""
-    feats, _, _, _ = load_pipeline()
-    test = feats[feats['ts'] >= pd.Timestamp('2026-01-01')]
-    pos = test.groupby('town', observed=True)['y_24h'].sum()
-    return set(pos[pos <= LOW_DATA_THRESHOLD].index.astype(str))
+def town_history(town: str, end_date_str: str, days_back: int = 90) -> pd.DataFrame:
+    """Daily active hours for `town`, ending on `end_date_str`, going back N days."""
+    d_hi = pd.Timestamp(end_date_str).normalize() + pd.Timedelta(days=1)
+    d_lo = d_hi - pd.Timedelta(days=days_back)
+    wide = load_data()['wide']
+    if town not in wide.columns:
+        return pd.DataFrame()
+    s = (wide[town] > 0).astype('int8')
+    s = s.loc[(s.index >= d_lo) & (s.index < d_hi)]
+    if s.empty:
+        return pd.DataFrame()
+    hourly = s.copy(); hourly.index = hourly.index.floor('h')
+    by_hour = hourly.groupby(level=0).max()
+    by_day = (by_hour.groupby(by_hour.index.date).sum()
+                     .rename('active_hours')
+                     .reset_index().rename(columns={'index': 'date'}))
+    by_day['date']      = pd.to_datetime(by_day['date'])
+    by_day['rolling_7'] = by_day['active_hours'].rolling(7, min_periods=1).mean()
+    return by_day
+
+
+@st.cache_data
+def town_hour_heatmap(town: str, end_date_str: str, days_back: int = 7) -> pd.DataFrame:
+    """7-day x 24-hour activity heatmap for one town. Cell = # of active 15-min slots
+    in that hour (0-4)."""
+    d_hi = pd.Timestamp(end_date_str).normalize() + pd.Timedelta(days=1)
+    d_lo = d_hi - pd.Timedelta(days=days_back)
+    wide = load_data()['wide']
+    if town not in wide.columns:
+        return pd.DataFrame()
+    s = (wide[town] > 0).astype('int8')
+    s = s.loc[(s.index >= d_lo) & (s.index < d_hi)]
+    if s.empty:
+        return pd.DataFrame()
+    df = s.reset_index(); df.columns = ['ts', 'active']
+    df['date'] = df['ts'].dt.date
+    df['hour'] = df['ts'].dt.hour
+    pivot = df.groupby(['date', 'hour'])['active'].sum().unstack('hour')
+    pivot = pivot.reindex(columns=range(24), fill_value=0)
+    return pivot
+
+
+# ---------------------- preflight ----------------------
+if not WIDE_PATH.exists():
+    st.error(
+        f'Missing {WIDE_PATH.relative_to(ROOT)}. '
+        f'Run `python src/build_timeseries.py` first to generate the activity matrix.'
+    )
+    st.stop()
+
+data = load_data()
+all_towns = sorted(data['wide'].columns.astype(str))
+date_lo = data['wide'].index.min().date()
+date_hi = data['wide'].index.max().date()
 
 
 # ---------------------- header ----------------------
-features, models, cals, fcols = load_pipeline()
-test_lo = pd.Timestamp('2026-01-01').date()
-test_hi = features['ts'].max().date()
-LOW_DATA = low_data_towns()
-
-
-def fmt_clock(ts: pd.Timestamp, local: bool) -> str:
-    """Format a timestamp as HH:MM in either UTC or CET (+1h, simplified)."""
-    return (ts + pd.Timedelta(hours=UTC_OFFSET_HOURS)).strftime('%H:%M') if local \
-        else ts.strftime('%H:%M')
-
-
 st.markdown(
-    "<h1 style='margin-bottom:8px'>Redispatch Forecast</h1>"
-    "<p style='color:#a6a6a6; font-size:1.05rem; margin-top:0'>"
-    "Schleswig-Holstein Netz · 175 substations · day-ahead probability of grid bottlenecks"
+    "<h1 style='margin-bottom:8px'>Redispatch in Schleswig-Holstein</h1>"
+    f"<p style='color:{COLOR_TEXT_MUTED}; font-size:1.05rem; margin-top:0'>"
+    "Where and when the SHN grid has had to step in. "
+    f"175 substations · {date_lo} → {date_hi}."
     "</p>",
     unsafe_allow_html=True,
 )
 
-# ============================================================
-# Tabs
-# ============================================================
-tab_map, tab_town = st.tabs(['Live forecast map', 'Town deep dive'])
+with st.expander('What is a redispatch event?'):
+    st.markdown(
+        'When wind or solar farms generate more power than the local '
+        'transmission lines can move out of the region, the grid operator '
+        'orders selected plants to **reduce or shift their output** so the '
+        'lines do not overload. Each such instruction is one *redispatch '
+        'event*. In Schleswig-Holstein this happens often along the windy '
+        'North Sea coast.\n\n'
+        '**This dashboard shows:** for any day, which substations were '
+        'congested and for how many hours. Bigger / redder bubble on the map '
+        '= more hours with redispatch activity that day.'
+    )
 
-# ============================================================
-# TAB 1 — Live forecast map
-# ============================================================
+# ---------------------- tabs ----------------------
+tab_map, tab_town = st.tabs(['Daily map', 'Town deep dive'])
+
+# =============================================================
+# TAB 1 — Daily map
+# =============================================================
 with tab_map:
-    # ----------- control bar -----------
     if 'sel_date' not in st.session_state:
-        st.session_state.sel_date = pd.Timestamp('2026-02-15').date()
+        st.session_state.sel_date = pd.Timestamp(date_hi).date()
 
-    c1, c2, c3, c4 = st.columns([1.0, 1.6, 1.2, 1.0])
+    c1, c2 = st.columns([1.2, 3])
     with c1:
         date = st.date_input('Date', value=st.session_state.sel_date,
-                             min_value=test_lo, max_value=test_hi, key='sel_date')
+                             min_value=date_lo, max_value=date_hi, key='sel_date')
     with c2:
-        hour = st.slider('Hour', min_value=0, max_value=23, value=12, key='sel_hour')
-    with c3:
-        horizon = st.selectbox('Forecast window', P.HORIZONS,
-                               index=P.HORIZONS.index('y_24h'),
-                               key='sel_horizon',
-                               format_func=lambda h: HORIZON_LABEL[h])
-    with c4:
-        threshold = st.slider('Risk threshold', 0, 90, 30, step=5,
-                              key='sel_threshold',
-                              format='%d%%',
-                              help='Towns at or above this probability are flagged as alerts.')
+        threshold = st.slider(
+            'Highlight towns above (hours active that day)',
+            0, 24, 4, step=1, key='sel_threshold',
+            help='Towns with at least this many active hours pop on the map; '
+                 'others dim into the background.',
+        )
 
-    use_cet = st.toggle('Show times in local time (CET)', value=True,
-                        help='Internal clock is UTC. Toggle to display CET (+1h).')
-
-    grid = forecast_grid(str(date))
-    if grid.empty:
-        st.error(f'No data for {date}. Pick a date between {test_lo} and {test_hi}.')
+    df = daily_hours(str(date))
+    if df.empty:
+        st.error(f'No data on {date}. Pick a date between {date_lo} and {date_hi}.')
         st.stop()
 
-    pcol = 'p_' + horizon.split('_')[1]
-    snap = grid[grid['hour'] == hour].copy()
-    snap['probability_pct'] = snap[pcol] * 100
-    snap['size'] = (snap[pcol] * 100).clip(lower=4)
-    snap['low_data'] = snap['town'].isin(LOW_DATA)
-
-    # ----------- daily summary headline -----------
-    n_alerts = int((snap[pcol] >= threshold / 100).sum())
-    avg_today = snap[pcol].mean()
-    busiest_today = snap.loc[snap[pcol].idxmax()]
-
-    grid_24h_avg = grid['p_24h'].mean()
-    if grid_24h_avg < 0.10:
-        weather_word, headline_color = 'calm', '#2ca02c'
-    elif grid_24h_avg < 0.20:
+    # ------ headline summary ------
+    n_alerts     = int((df['active_hours'] >= threshold).sum())
+    n_any        = int((df['active_hours'] > 0).sum())
+    grid_hours   = int(df['active_hours'].sum())
+    busiest      = df.loc[df['active_hours'].idxmax()]
+    if grid_hours == 0:
+        weather_word, headline_color = 'quiet', '#2ca02c'
+    elif grid_hours < 100:
         weather_word, headline_color = 'normal', COLOR_TEXT
-    elif grid_24h_avg < 0.30:
+    elif grid_hours < 300:
         weather_word, headline_color = 'busy', '#ff7f0e'
     else:
         weather_word, headline_color = 'very busy', '#ff3030'
@@ -169,386 +232,238 @@ with tab_map:
         f"margin: 8px 0 18px 0;'>"
         f"<div style='font-size:0.78rem; color:{COLOR_TEXT_MUTED}; "
         f"text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px'>"
-        f"OUTLOOK · {date}</div>"
+        f"DAY · {date.strftime('%A %d %B %Y')}</div>"
         f"<div style='font-size:1.4rem; font-family:Space Grotesk,Inter,sans-serif; "
         f"font-weight:600; letter-spacing:-0.025em; line-height:1.2'>"
-        f"<span style='color:{headline_color}'>The grid looks {weather_word} today</span> "
+        f"<span style='color:{headline_color}'>It was a {weather_word} day</span> "
         f"<span style='color:{COLOR_TEXT_MUTED}'>·</span> "
-        f"<span style='color:{COLOR_TEXT}'>{n_alerts} towns flagged at "
-        f"≥{threshold}% probability</span></div>"
+        f"<span style='color:{COLOR_TEXT}'>{n_any} of 175 substations had redispatch, "
+        f"{grid_hours} town-hours grid-wide</span></div>"
         f"<div style='color:{COLOR_TEXT_MUTED}; margin-top:6px; font-size:0.92rem'>"
-        f"At {fmt_clock(pd.Timestamp(date) + pd.Timedelta(hours=hour), use_cet)} "
-        f"{'CET' if use_cet else 'UTC'}, the highest predicted "
-        f"<b style='color:{COLOR_TEXT}'>{HORIZON_LABEL[horizon].lower()}</b> probability "
-        f"is <b style='color:{COLOR_TEXT}'>{busiest_today[pcol]:.0%}</b> at "
-        f"<b style='color:{COLOR_TEXT}'>{busiest_today['town']}</b>."
+        f"Busiest substation: <b style='color:{COLOR_TEXT}'>{busiest['town']}</b> "
+        f"with <b style='color:{COLOR_TEXT}'>{int(busiest['active_hours'])} active hours</b>. "
+        f"<b style='color:{COLOR_TEXT}'>{n_alerts}</b> substations were congested for "
+        f"≥{threshold} hours."
         f"</div></div>",
         unsafe_allow_html=True,
     )
 
-    # ----------- KPI strip -----------
+    # ------ KPI strip ------
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric(f'Above {threshold}% (alerts)', f"{n_alerts}",
-              help='Number of substations the operator should plan to monitor.')
-    k2.metric('Above 50%', f"{int((snap[pcol] >= 0.5).sum())}",
-              help='High-confidence event candidates.')
-    k3.metric('Highest probability', f"{snap[pcol].max():.0%}",
-              busiest_today['town'])
-    k4.metric('Grid average', f"{snap[pcol].mean():.0%}")
+    k1.metric(f'Above {threshold}h', f"{n_alerts}",
+              help=f'Substations with ≥ {threshold} active hours.')
+    k2.metric('Any redispatch today', f"{n_any}",
+              help='Substations with at least one event.')
+    k3.metric('Most active town',
+              f"{int(busiest['active_hours'])}h",
+              busiest['town'])
+    k4.metric('Total town-hours', f"{grid_hours}",
+              help='Sum of active hours across all substations today.')
 
-    # ----------- the map -----------
-    snap['display_size'] = np.where(
-        snap[pcol] >= threshold / 100, snap['size'] * 1.4, snap['size'] * 0.6
+    # ------ map ------
+    df['size_metric']   = df['active_hours'].clip(lower=0)
+    df['display_size']  = np.where(
+        df['active_hours'] >= threshold, df['size_metric'].clip(lower=2) * 1.6,
+        df['size_metric'].clip(lower=2) * 0.7,
     )
-    snap['marker_opacity'] = np.where(snap[pcol] >= threshold / 100, 0.95, 0.35)
+    df['display_opacity'] = np.where(df['active_hours'] >= threshold, 0.95, 0.35)
 
     fig_map = px.scatter_mapbox(
-        snap.sort_values(pcol),
+        df.sort_values('active_hours'),
         lat='lat', lon='lon',
         size='display_size',
-        color='probability_pct',
+        color='active_hours',
         color_continuous_scale=HEAT_SCALE,
-        range_color=[0, 100],
-        size_max=34,
+        range_color=[0, 24],
+        size_max=36,
         hover_name='town',
         hover_data={
-            'probability_pct': ':.1f',
-            'p_1h':  ':.1%', 'p_6h':  ':.1%', 'p_24h': ':.1%',
-            'lat': False, 'lon': False, 'display_size': False,
-            'size': False, 'hour': False, 'marker_opacity': False,
-            'low_data': False,
+            'active_hours': True, 'n_events': True, 'peak_concurrency': True,
+            'dominant_reason': True, 'lat': False, 'lon': False,
+            'display_size': False, 'size_metric': False, 'display_opacity': False,
+            'active_15min_slots': False,
         },
         zoom=7.0, center={'lat': 54.3, 'lon': 9.7},
         height=620,
     )
     fig_map.update_traces(
-        marker=dict(opacity=snap.sort_values(pcol)['marker_opacity']),
+        marker=dict(opacity=df.sort_values('active_hours')['display_opacity']),
         hovertemplate=(
             '<b>%{hovertext}</b><br>'
-            f'{HORIZON_LABEL[horizon]}: ' '%{customdata[0]:.1f}%<br>'
-            'Next 1 hour: %{customdata[1]:.1%}<br>'
-            'Next 6 hours: %{customdata[2]:.1%}<br>'
-            'Next 24 hours: %{customdata[3]:.1%}<extra></extra>'
+            'Active hours: <b>%{customdata[0]}h</b><br>'
+            'Distinct events: %{customdata[1]}<br>'
+            'Peak concurrent ops: %{customdata[2]}<br>'
+            'Dominant reason: %{customdata[3]}<extra></extra>'
         ),
     )
     fig_map.update_layout(
         margin=dict(l=0, r=0, t=10, b=0),
         coloraxis_colorbar=dict(
-            title=dict(text='Probability', font=dict(color=COLOR_TEXT_MUTED)),
+            title=dict(text='Active hours', font=dict(color=COLOR_TEXT_MUTED)),
             tickfont=dict(color=COLOR_TEXT_MUTED),
-            ticksuffix='%',
+            ticksuffix='h',
+            tickvals=[0, 6, 12, 18, 24],
         ),
     )
     st.plotly_chart(fig_map, use_container_width=True)
 
-    # ----------- alert action list (CSV-exportable) -----------
-    st.markdown('### Action list')
-    st.caption(
-        f'Towns at or above the **{threshold}% threshold** for **{HORIZON_LABEL[horizon].lower()}** '
-        f'at this hour. Sorted by probability. ⚠ = limited history (treat with care).'
-    )
-
-    alerts = snap[snap[pcol] >= threshold / 100].copy()
-    alerts = alerts.sort_values(pcol, ascending=False)
-    if alerts.empty:
-        st.info(
-            f'No towns above {threshold}%. Drag the threshold lower or pick a busier hour.',
-            icon='ℹ️',
-        )
+    # ------ leaderboard ------
+    st.markdown('### Top 15 most-congested substations today')
+    top = df.nlargest(15, 'active_hours').copy()
+    if (top['active_hours'] == 0).all():
+        st.info('No redispatch events anywhere on this date.')
     else:
-        disp = alerts[['town', 'p_1h', 'p_6h', 'p_24h', 'low_data']].copy()
-        disp.insert(0, '#', range(1, len(disp) + 1))
-        disp['Town'] = disp.apply(
-            lambda r: f"{'⚠ ' if r['low_data'] else ''}{r['town']}", axis=1)
-        disp = disp.drop(columns=['town', 'low_data'])
-        disp = disp.rename(columns={
-            'p_1h':  HORIZON_LABEL['y_1h'],
-            'p_6h':  HORIZON_LABEL['y_6h'],
-            'p_24h': HORIZON_LABEL['y_24h'],
+        top.insert(0, '#', range(1, len(top) + 1))
+        leaderboard = top[['#', 'town', 'active_hours', 'n_events',
+                           'peak_concurrency', 'dominant_reason']].copy()
+        leaderboard = leaderboard.rename(columns={
+            'town':             'Town',
+            'active_hours':     'Active hours',
+            'n_events':         'Distinct events',
+            'peak_concurrency': 'Peak concurrent ops',
+            'dominant_reason':  'Dominant reason',
         })
-        disp = disp[['#', 'Town', HORIZON_LABEL['y_1h'],
-                     HORIZON_LABEL['y_6h'], HORIZON_LABEL['y_24h']]]
-        prob_cols = [HORIZON_LABEL[h] for h in P.HORIZONS]
         st.dataframe(
-            disp.style
-                .format({c: '{:.1%}' for c in prob_cols})
-                .background_gradient(cmap='YlOrRd', subset=[HORIZON_LABEL[horizon]],
-                                     vmin=0, vmax=1),
-            use_container_width=True, hide_index=True, height=320,
+            leaderboard.style.background_gradient(
+                cmap='YlOrRd', subset=['Active hours'], vmin=0, vmax=24,
+            ),
+            use_container_width=True, hide_index=True, height=560,
         )
 
-        # CSV export — full grid for this date+hour, not just the alert-list slice,
-        # so the operator gets context.
-        csv_buffer = io.StringIO()
-        export_df = alerts[['town', 'p_1h', 'p_6h', 'p_24h']].copy()
-        export_df.insert(0, 'date', date)
-        export_df.insert(1, 'hour_utc', hour)
-        export_df.insert(2, 'horizon_explained', HORIZON_LABEL[horizon])
-        export_df['low_data_flag'] = alerts['low_data'].values
-        export_df.to_csv(csv_buffer, index=False)
+        # CSV export
+        csv_buf = io.StringIO()
+        export = df.sort_values('active_hours', ascending=False)[
+            ['town', 'active_hours', 'n_events', 'peak_concurrency',
+             'dominant_reason', 'lat', 'lon']
+        ].copy()
+        export.insert(0, 'date', date)
+        export.to_csv(csv_buf, index=False)
 
         col_dl1, col_dl2 = st.columns([1, 5])
         with col_dl1:
             st.download_button(
-                'Download CSV',
-                data=csv_buffer.getvalue(),
-                file_name=f'redispatch_alerts_{date}_h{hour:02d}_{horizon}.csv',
+                'Download CSV (all towns)',
+                data=csv_buf.getvalue(),
+                file_name=f'redispatch_{date}.csv',
                 mime='text/csv',
             )
         with col_dl2:
-            st.caption(f'{len(alerts)} alert rows · UTC time · '
-                       f'thresholds and horizon embedded in the file.')
+            st.caption('Full grid for this date · sorted by active hours · '
+                       'lat/lon included for downstream maps.')
 
-    # ----------- 7-day outlook strip -----------
-    st.markdown('### 7-day outlook')
-    st.caption('Daily peak Next-24-hour probability for the top 12 most-active substations.')
-
-    busiest_towns = (grid.groupby('town', observed=True)['p_24h'].max()
-                          .sort_values(ascending=False).head(12).index.tolist())
-
-    horizon_dates = [pd.Timestamp(date) + pd.Timedelta(days=i) for i in range(7)]
-    rows = []
-    for d in horizon_dates:
-        if d.date() < test_lo or d.date() > test_hi:
-            continue
-        gd = forecast_grid(str(d.date()))
-        if gd.empty:
-            continue
-        peaks = gd[gd['town'].isin(busiest_towns)].groupby(
-            'town', observed=True)['p_24h'].max()
-        for tw, p in peaks.items():
-            rows.append({'town': tw, 'date': d.date(), 'p': p})
-
-    if rows:
-        out = pd.DataFrame(rows)
-        wide_strip = out.pivot(index='town', columns='date', values='p')
-        wide_strip = wide_strip.reindex(busiest_towns)
-        date_labels = [pd.Timestamp(c).strftime('%a %d %b') for c in wide_strip.columns]
-
-        fig_strip = go.Figure(go.Heatmap(
-            z=wide_strip.values,
-            x=date_labels,
-            y=wide_strip.index,
-            colorscale=HEAT_SCALE,
-            zmin=0, zmax=1,
-            text=(wide_strip.values * 100).round(0).astype(int),
-            texttemplate='%{text}%',
-            textfont=dict(color=COLOR_TEXT, size=11),
-            hovertemplate=(
-                '<b>%{y}</b><br>%{x}<br>Peak P(24h): %{z:.1%}<extra></extra>'
-            ),
-            colorbar=dict(
-                title=dict(text='Peak P(24h)', font=dict(color=COLOR_TEXT_MUTED)),
-                tickformat='.0%',
-                tickfont=dict(color=COLOR_TEXT_MUTED),
-            ),
-        ))
-        fig_strip.update_layout(
-            height=440,
-            margin=dict(l=10, r=10, t=10, b=40),
-            xaxis=dict(side='top'),
-            yaxis=dict(autorange='reversed'),
-        )
-        st.plotly_chart(fig_strip, use_container_width=True)
-    else:
-        st.info('Not enough days remaining in the test window for a 7-day outlook from this date.')
-
-# ============================================================
+# =============================================================
 # TAB 2 — Town deep dive
-# ============================================================
+# =============================================================
 with tab_town:
-    towns = sorted(features['town'].astype(str).unique())
-    default_town = 'Husum' if 'Husum' in towns else towns[0]
-
     c1, c2 = st.columns([1.5, 1])
     with c1:
-        town = st.selectbox('Town', towns, index=towns.index(default_town))
+        default_town = 'Husum' if 'Husum' in all_towns else all_towns[0]
+        town = st.selectbox('Town', all_towns, index=all_towns.index(default_town))
     with c2:
         deep_date = st.date_input(
-            'Date',
-            value=st.session_state.get('sel_date', pd.Timestamp('2026-02-15').date()),
-            min_value=test_lo, max_value=test_hi, key='deep_date',
+            'End date',
+            value=st.session_state.get('sel_date', pd.Timestamp(date_hi).date()),
+            min_value=date_lo, max_value=date_hi, key='deep_date',
+            help='The history view ends on this date and looks back 90 days.',
         )
 
-    if town in LOW_DATA:
-        st.warning(
-            f'⚠ **{town}** has very few historical events in the test window '
-            '(<5 positives). Predictions for this town are best treated as a rough guide.',
-            icon='⚠️',
-        )
+    hist = town_history(town, str(deep_date), days_back=90)
 
-    try:
-        df = P.predict_day(town, str(deep_date))
-    except ValueError as exc:
-        st.error(str(exc))
-        df = None
-
-    if df is not None and not df.empty:
-        # day KPIs
-        peak_p24 = df['p_24h'].max()
-        peak_hr  = df.loc[df['p_24h'].idxmax(), 'ts']
-        actual = bool(df['y_24h'].max()) if 'y_24h' in df.columns else None
+    if hist.empty:
+        st.warning(f'No activity recorded for {town} in the chosen 90-day window.')
+    else:
+        # ----- KPI strip -----
+        total_h    = int(hist['active_hours'].sum())
+        n_active   = int((hist['active_hours'] > 0).sum())
+        busiest    = hist.loc[hist['active_hours'].idxmax()]
+        pct_active = 100 * total_h / (90 * 24)
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric(f'Peak {HORIZON_LABEL["y_24h"]} probability',
-                  f"{peak_p24:.0%}", f"at {peak_hr.strftime('%H:%M')} UTC")
-        k2.metric(f'Peak {HORIZON_LABEL["y_6h"]} probability',
-                  f"{df['p_6h'].max():.0%}")
-        k3.metric(f'Peak {HORIZON_LABEL["y_1h"]} probability',
-                  f"{df['p_1h'].max():.0%}")
-        if actual is not None:
-            k4.metric('Did it actually happen?',
-                      'Yes' if actual else 'No')
+        k1.metric('Total active hours', f"{total_h}h")
+        k2.metric('Days with redispatch', f"{n_active} / 90")
+        k3.metric('Busiest day',
+                  f"{int(busiest['active_hours'])}h",
+                  busiest['date'].strftime('%d %b %Y'))
+        k4.metric('% of time congested', f"{pct_active:.1f}%")
 
-        # ---------- hourly forecast (Plotly dark) ----------
-        st.markdown(f'### {town} — hourly forecast for {deep_date}')
+        # ----- daily history line chart -----
+        st.markdown(f'### {town} - 90-day history')
         st.caption(
-            'One line per forecast window. Open circles mark hours where a '
-            'redispatch event actually happened (back-test).'
+            'Bar = active hours that day. Line = 7-day rolling average. '
+            'A flat-low line means a quiet town; rising lines mean ongoing '
+            'congestion that needs sustained attention.'
         )
 
-        x = df['ts'].dt.hour
-        fig_ts = go.Figure()
-        fig_ts.add_trace(go.Scatter(
-            x=x, y=df['p_24h'], mode='lines',
-            line=dict(color='rgba(0,153,255,0)'),
-            fill='tozeroy', fillcolor='rgba(0,153,255,0.10)',
-            showlegend=False, hoverinfo='skip',
+        fig_hist = go.Figure()
+        fig_hist.add_trace(go.Bar(
+            x=hist['date'], y=hist['active_hours'],
+            name='Active hours',
+            marker=dict(color=COLOR_ACCENT,
+                        line=dict(color='rgba(0,0,0,0.3)', width=0.4)),
+            hovertemplate='<b>%{x|%a %d %b}</b><br>%{y}h active<extra></extra>',
         ))
-        line_specs = [
-            ('y_1h',  '#ff3030', 'circle'),
-            ('y_6h',  '#ff7f0e', 'square'),
-            ('y_24h', COLOR_ACCENT, 'triangle-up'),
-        ]
-        for h, color, sym in line_specs:
-            pcol_loc = 'p_' + h.split('_')[1]
-            fig_ts.add_trace(go.Scatter(
-                x=x, y=df[pcol_loc],
-                mode='lines+markers',
-                name=HORIZON_LABEL[h],
-                line=dict(color=color, width=2.4),
-                marker=dict(symbol=sym, size=9),
-                hovertemplate=(f'<b>{HORIZON_LABEL[h]}</b><br>'
-                               'Hour: %{x:02d}:00<br>'
-                               'Probability: %{y:.1%}<extra></extra>'),
-            ))
-        for h, color, _ in line_specs:
-            if h in df.columns:
-                m = df[h] == 1
-                if m.any():
-                    pcol_loc = 'p_' + h.split('_')[1]
-                    fig_ts.add_trace(go.Scatter(
-                        x=x[m], y=df.loc[m, pcol_loc],
-                        mode='markers',
-                        marker=dict(size=18, symbol='circle-open',
-                                    line=dict(color=color, width=2.5)),
-                        showlegend=False,
-                        hovertemplate=(f'<b>Actual event</b> ({HORIZON_LABEL[h]})<br>'
-                                       'Hour: %{x:02d}:00<extra></extra>'),
-                    ))
-        fig_ts.update_layout(
-            height=380,
+        fig_hist.add_trace(go.Scatter(
+            x=hist['date'], y=hist['rolling_7'],
+            mode='lines', name='7-day avg',
+            line=dict(color='#ff7f0e', width=2.5, dash='dot'),
+            hovertemplate='<b>%{x|%a %d %b}</b><br>7-day avg: %{y:.1f}h<extra></extra>',
+        ))
+        fig_hist.update_layout(
+            height=340,
             margin=dict(l=10, r=10, t=10, b=40),
-            xaxis=dict(title='Hour of day (UTC)', tickmode='array',
-                       tickvals=list(range(0, 24, 2)),
-                       ticktext=[f'{h:02d}:00' for h in range(0, 24, 2)]),
-            yaxis=dict(title='Probability', tickformat='.0%', range=[0, 1]),
+            xaxis=dict(title=None),
+            yaxis=dict(title='Active hours per day', range=[0, 24]),
             legend=dict(orientation='h', y=1.05, x=1, xanchor='right'),
             hovermode='x unified',
         )
-        st.plotly_chart(fig_ts, use_container_width=True)
+        st.plotly_chart(fig_hist, use_container_width=True)
 
-        # ---------- drivers ----------
-        st.markdown('### Why does the model predict that?')
+        # ----- 7-day hour-of-day heatmap -----
+        heat = town_hour_heatmap(town, str(deep_date), days_back=7)
+        st.markdown(f'### {town} - last 7 days, hour-by-hour')
         st.caption(
-            'Each bar shows how strongly that input pushed the prediction up '
-            '(blue) or down (red) at the peak hour.'
+            'Each cell = how many of the four 15-min slots in that hour were '
+            'active. 4 = the entire hour was congested; 0 = nothing happened.'
         )
 
-        drv_horizon = st.radio(
-            'Forecast window to explain',
-            P.HORIZONS, index=P.HORIZONS.index('y_24h'),
-            format_func=lambda h: HORIZON_LABEL[h],
-            horizontal=True,
-        )
-
-        X_day = features[(features['town'] == town) &
-                         (features['ts'].dt.normalize() == pd.Timestamp(deep_date))][fcols].copy()
-        if X_day.empty:
-            st.warning('No model inputs available for this town/date.')
+        if heat.empty:
+            st.info('No activity in the last 7 days.')
         else:
-            pcol3 = 'p_' + drv_horizon.split('_')[1]
-            peak_idx = int(np.argmax(df[pcol3].values))
-            peak_ts3  = df.iloc[peak_idx]['ts']
-            peak_p3   = float(df.iloc[peak_idx][pcol3])
-
-            x_peak = X_day.iloc[[peak_idx]].values
-            contrib = models[drv_horizon].predict(x_peak, pred_contrib=True)[0]
-            bias, contrib = float(contrib[-1]), contrib[:-1]
-
-            ctr = pd.DataFrame({'feature': fcols, 'contribution': contrib})
-            is_t = ctr['feature'].str.startswith('town_')
-            town_total = float(ctr.loc[is_t, 'contribution'].sum())
-            ctr = pd.concat(
-                [ctr[~is_t],
-                 pd.DataFrame({'feature': ['town_*'],
-                               'contribution': [town_total]})],
-                ignore_index=True,
+            date_labels = [pd.Timestamp(d).strftime('%a %d %b') for d in heat.index]
+            fig_heat = go.Figure(go.Heatmap(
+                z=heat.values,
+                x=[f'{h:02d}:00' for h in heat.columns],
+                y=date_labels,
+                colorscale=HEAT_SCALE,
+                zmin=0, zmax=4,
+                hovertemplate=('<b>%{y}</b><br>%{x}<br>'
+                               'Active 15-min slots: %{z}/4<extra></extra>'),
+                colorbar=dict(
+                    title=dict(text='Slots / 4', font=dict(color=COLOR_TEXT_MUTED)),
+                    tickfont=dict(color=COLOR_TEXT_MUTED),
+                ),
+            ))
+            fig_heat.update_layout(
+                height=320,
+                margin=dict(l=10, r=10, t=10, b=40),
+                xaxis=dict(side='top', title=None),
+                yaxis=dict(autorange='reversed', title=None),
             )
-            ctr['abs']   = ctr['contribution'].abs()
-            ctr['label'] = ctr['feature'].apply(pretty)
-            top = ctr.sort_values('abs', ascending=False).head(12).iloc[::-1]
+            st.plotly_chart(fig_heat, use_container_width=True)
 
-            colA, colB = st.columns([2, 1])
-            with colA:
-                st.metric(f'Peak {HORIZON_LABEL[drv_horizon]} probability',
-                          f"{peak_p3:.0%}",
-                          f"at {peak_ts3.strftime('%H:%M')} UTC")
-                colors = [COLOR_ACCENT if v > 0 else '#ff3030'
-                          for v in top['contribution']]
-                fig_shap = go.Figure(go.Bar(
-                    x=top['contribution'], y=top['label'],
-                    orientation='h',
-                    marker=dict(color=colors, line=dict(color='rgba(0,0,0,0.3)', width=0.5)),
-                    hovertemplate=('<b>%{y}</b><br>'
-                                   'Push on log-odds: %{x:+.3f}<extra></extra>'),
-                ))
-                fig_shap.add_vline(x=0, line_color=COLOR_TEXT_MUTED, line_width=0.6)
-                fig_shap.update_layout(
-                    height=460,
-                    margin=dict(l=10, r=10, t=20, b=40),
-                    xaxis=dict(title='Push on prediction (blue = up, red = down)'),
-                    yaxis=dict(automargin=True),
-                )
-                st.plotly_chart(fig_shap, use_container_width=True)
-            with colB:
-                st.markdown('**Numbers at the peak hour**')
-                row = X_day.iloc[peak_idx]
-                disp_rows = []
-                for raw_name in top['feature'][::-1]:
-                    if raw_name == 'town_*':
-                        continue
-                    if raw_name in row.index:
-                        disp_rows.append({
-                            'Feature': pretty(raw_name),
-                            'Value':   float(row[raw_name]),
-                        })
-                disp = pd.DataFrame(disp_rows).set_index('Feature')
-                st.dataframe(disp.style.format({'Value': '{:.2f}'}),
-                             use_container_width=True, height=460)
-
-# ---------------- footer methodology ----------------
-with st.expander('How this model works (and what to watch out for)'):
+# ---------------- footer ----------------
+with st.expander('About this dashboard'):
     st.markdown(
-        '* **Three models, one per look-ahead window** (1h, 6h, 24h). LightGBM, '
-        'isotonic-calibrated on the validation fold.\n'
-        '* **No leakage at the 24-hour horizon.** Every input is shifted back 24 hours '
-        'before any rolling window.\n'
-        '* **Time-based split.** Train Jan 2024 - Jun 2025 · validate Jul - Dec 2025 · '
-        'test Jan - Mar 2026.\n'
-        '* **Test PR-AUC** — 0.231 / 0.325 / 0.439 for 1h / 6h / 24h '
-        '(4-5× better than random).\n'
-        '* **Limitation, version 1.** Weather + grid inputs are *actuals* (Berlin proxy '
-        'for weather). In production you would feed in day-ahead forecasts. '
-        'Real-world accuracy will drop a few percentage points.'
+        '* **Data source.** Operational redispatch records from '
+        'Schleswig-Holstein Netz (SHN), filtered to grid-bottleneck reasons '
+        '(*Netzengpass* / *Netzengpass I*).\n'
+        '* **Severity metric.** Total active hours per (town, day) - between '
+        '0 and 24. A town active 14 hours had at least one redispatch event '
+        'overlapping each of those 14 hours.\n'
+        '* **Window.** 1 January 2024 to the latest available data.\n'
+        '* **Geocoding.** Town centroids from OpenStreetMap (Nominatim) with a '
+        'small set of manual overrides for unnamed substations.\n'
+        '* **What is not in v1.** Day-ahead probability forecasts. The '
+        'underlying ML pipeline is WIP and will be layered onto '
+        'this dashboard in a future release.'
     )
