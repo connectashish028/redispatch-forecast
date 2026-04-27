@@ -33,7 +33,7 @@ OUT_WIDE      = OUT_DIR / 'ts_15min_wide.parquet'
 OUT_LONG      = OUT_DIR / 'ts_15min_long.parquet'
 
 START_CUTOFF  = pd.Timestamp('2024-01-01')
-END_CUTOFF    = pd.Timestamp('2026-04-01')
+END_CUTOFF    = pd.Timestamp('2026-04-23')
 WEEK_MIN      = 7 * 24 * 60
 SLOT          = pd.Timedelta(minutes=15)
 TEST_REASON   = 'Funktionsnachweis'

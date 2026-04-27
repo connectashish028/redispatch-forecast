@@ -28,7 +28,7 @@ COLOR_GRID        = 'rgba(255, 255, 255, 0.06)'
 
 # Probability heat scale (cool -> hot) that pops on pure black.
 HEAT_SCALE = [
-    [0.00, '#0a0a0a'],   # near black for ~0%
+    [0.00, 'rgba(10, 10, 10, 0)'],   # near black for ~0%
     [0.10, '#1f3a5f'],   # deep blue
     [0.30, '#0099ff'],   # Framer Blue
     [0.55, '#ff7f0e'],   # orange
@@ -228,7 +228,7 @@ def register_plotly_template():
                         borderwidth=1, font=dict(color=COLOR_TEXT)),
             hoverlabel=dict(bgcolor=COLOR_SURFACE, bordercolor=COLOR_ACCENT,
                             font=dict(family='Inter', color=COLOR_TEXT, size=12)),
-            mapbox=dict(style='carto-darkmatter'),
+            mapbox=dict(style='carto-positron'),
         )
     )
     pio.templates['framer_dark'] = template
