@@ -85,7 +85,7 @@ def main():
 
     out_path = "smard_weather_2024_to_mar2026.parquet"
     merged.to_parquet(out_path, index=False)
-    print(f"\nsaved: {out_path}")
+    print(f"\nsaved: data/external/smard_weather_2024_to_mar2026.parquet")
 
     return merged
 

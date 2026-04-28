@@ -36,6 +36,7 @@ models/
 
 # Daily prediction outputs (regenerable from src/score_today.py)
 data/predictions/
+app_test.py
 
 # Loose artifacts dropped at the project root by older runs
 /ts_15min*.parquet

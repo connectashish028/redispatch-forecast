@@ -42,12 +42,22 @@ GEO_PATH  = ROOT / 'data' / 'external'  / 'towns_geo.parquet'
 
 
 # ---------------------- caches ----------------------
+
+def _read_parquet(path: Path) -> pd.DataFrame:
+    try:
+        return pd.read_parquet(path)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Missing {path.relative_to(ROOT)}. Run `python src/build_timeseries.py`.")
+    except Exception as exc:
+        raise RuntimeError(f"Unable to load {path.relative_to(ROOT)}: {exc}")
+
+
 @st.cache_resource
 def load_data() -> dict:
     """Load wide (15-min × town) + long (with reasons) + geo. Returns a dict."""
-    wide = pd.read_parquet(WIDE_PATH)                 # 15-min × town int counts
-    long = pd.read_parquet(LONG_PATH) if LONG_PATH.exists() else None
-    geo  = pd.read_parquet(GEO_PATH).dropna(subset=['lat', 'lon'])
+    wide = _read_parquet(WIDE_PATH)
+    long = _read_parquet(LONG_PATH) if LONG_PATH.exists() else None
+    geo  = _read_parquet(GEO_PATH).dropna(subset=['lat', 'lon'])
     return {'wide': wide, 'long': long, 'geo': geo}
 
 
@@ -106,6 +116,25 @@ def daily_hours(date_str: str) -> pd.DataFrame:
 
 
 @st.cache_data
+def multi_day_hours(days_back: int = 90) -> pd.DataFrame:
+    """Generate DataFrame for animation: last N days, per-town daily metrics."""
+    end_date = pd.Timestamp.now().normalize()
+    start_date = end_date - pd.Timedelta(days=days_back)
+    all_dates = pd.date_range(start=start_date, end=end_date, freq='D')
+
+    dfs = []
+    for d in all_dates:
+        df_day = daily_hours(str(d.date()))
+        if not df_day.empty:
+            df_day['date'] = d.date()
+            dfs.append(df_day)
+
+    if not dfs:
+        return pd.DataFrame()
+    return pd.concat(dfs, ignore_index=True)
+
+
+@st.cache_data
 def town_history(town: str, end_date_str: str, days_back: int = 90) -> pd.DataFrame:
     """Daily active hours for `town`, ending on `end_date_str`, going back N days."""
     d_hi = pd.Timestamp(end_date_str).normalize() + pd.Timedelta(days=1)
@@ -156,7 +185,11 @@ if not WIDE_PATH.exists():
     )
     st.stop()
 
-data = load_data()
+try:
+    data = load_data()
+except Exception as exc:
+    st.error(str(exc))
+    st.stop()
 all_towns = sorted(data['wide'].columns.astype(str))
 date_lo = data['wide'].index.min().date()
 date_hi = data['wide'].index.max().date()
@@ -192,75 +225,91 @@ tab_map, tab_town = st.tabs(['Daily map', 'Town deep dive'])
 # TAB 1 — Daily map
 # =============================================================
 with tab_map:
-    if 'sel_date' not in st.session_state:
-        st.session_state.sel_date = pd.Timestamp(date_hi).date()
-
-    c1, c2 = st.columns([1.2, 3])
-    with c1:
-        date = st.date_input('Date', value=st.session_state.sel_date,
-                             min_value=date_lo, max_value=date_hi, key='sel_date')
-    with c2:
-        threshold = st.slider(
-            'Highlight towns above (hours active that day)',
-            0, 24, 4, step=1, key='sel_threshold',
-            help='Towns with at least this many active hours pop on the map; '
-                 'others dim into the background.',
-        )
-
-    df = daily_hours(str(date))
-    if df.empty:
-        st.error(f'No data on {date}. Pick a date between {date_lo} and {date_hi}.')
-        st.stop()
-
-    # ------ headline summary ------
-    n_alerts     = int((df['active_hours'] >= threshold).sum())
-    n_any        = int((df['active_hours'] > 0).sum())
-    grid_hours   = int(df['active_hours'].sum())
-    busiest      = df.loc[df['active_hours'].idxmax()]
-    if grid_hours == 0:
-        weather_word, headline_color = 'quiet', '#2ca02c'
-    elif grid_hours < 100:
-        weather_word, headline_color = 'normal', COLOR_TEXT
-    elif grid_hours < 300:
-        weather_word, headline_color = 'busy', '#ff7f0e'
-    else:
-        weather_word, headline_color = 'very busy', '#ff3030'
-
-    st.markdown(
-        f"<div style='padding:18px 22px; border-radius:14px; "
-        f"background-color:{COLOR_SURFACE}; border:1px solid {COLOR_RING}; "
-        f"margin: 8px 0 18px 0;'>"
-        f"<div style='font-size:0.78rem; color:{COLOR_TEXT_MUTED}; "
-        f"text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px'>"
-        f"DAY · {date.strftime('%A %d %B %Y')}</div>"
-        f"<div style='font-size:1.4rem; font-family:Space Grotesk,Inter,sans-serif; "
-        f"font-weight:600; letter-spacing:-0.025em; line-height:1.2'>"
-        f"<span style='color:{headline_color}'>It was a {weather_word} day</span> "
-        f"<span style='color:{COLOR_TEXT_MUTED}'>·</span> "
-        f"<span style='color:{COLOR_TEXT}'>{n_any} of 175 substations had redispatch, "
-        f"{grid_hours} town-hours grid-wide</span></div>"
-        f"<div style='color:{COLOR_TEXT_MUTED}; margin-top:6px; font-size:0.92rem'>"
-        f"Busiest substation: <b style='color:{COLOR_TEXT}'>{busiest['town']}</b> "
-        f"with <b style='color:{COLOR_TEXT}'>{int(busiest['active_hours'])} active hours</b>. "
-        f"<b style='color:{COLOR_TEXT}'>{n_alerts}</b> substations were congested for "
-        f"≥{threshold} hours."
-        f"</div></div>",
-        unsafe_allow_html=True,
+    animation_mode = st.checkbox(
+        'Enable 90-Day Animation', value=False,
+        help='Animate markers over the last 90 days instead of a single day.',
     )
 
-    # ------ KPI strip ------
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric(f'Above {threshold}h', f"{n_alerts}",
-              help=f'Substations with ≥ {threshold} active hours.')
-    k2.metric('Any redispatch today', f"{n_any}",
-              help='Substations with at least one event.')
-    k3.metric('Most active town',
-              f"{int(busiest['active_hours'])}h",
-              busiest['town'])
-    k4.metric('Total town-hours', f"{grid_hours}",
-              help='Sum of active hours across all substations today.')
+    if animation_mode:
+        threshold = st.slider('Highlight towns above (hours active)', 0, 24, 4, step=1)
+        df = multi_day_hours(90)
+        if df.empty:
+            st.error('No data in the last 90 days.')
+            st.stop()
 
-    # ------ map ------
+        st.markdown(
+            f"<div style='padding:18px 22px; border-radius:14px; "
+            f"background-color:{COLOR_SURFACE}; border:1px solid {COLOR_RING}; "
+            f"margin: 8px 0 18px 0;'>"
+            f"<div style='font-size:0.78rem; color:{COLOR_TEXT_MUTED}; "
+            f"text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px'>"
+            f"ANIMATION · Last 90 Days</div>"
+            f"<div style='font-size:1.4rem; font-family:Space Grotesk,Inter,sans-serif; "
+            f"font-weight:600; letter-spacing:-0.025em; line-height:1.2'>"
+            f"Watch congestion evolve over time</div>"
+            f"<div style='color:{COLOR_TEXT_MUTED}; margin-top:6px; font-size:0.92rem'>"
+            f"Use the slider below the map to scrub through days. Towns above {threshold}h are highlighted."
+            f"</div></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        if 'sel_date' not in st.session_state:
+            st.session_state.sel_date = pd.Timestamp(date_hi).date()
+
+        c1, c2 = st.columns([1.2, 3])
+        with c1:
+            date = st.date_input('Date', value=st.session_state.sel_date,
+                                 min_value=date_lo, max_value=date_hi, key='sel_date')
+        with c2:
+            threshold = st.slider('Highlight towns above (hours active)', 0, 24, 4, step=1)
+
+        df = daily_hours(str(date))
+        if df.empty:
+            st.error(f'No data on {date}. Pick a date between {date_lo} and {date_hi}.')
+            st.stop()
+
+        n_alerts     = int((df['active_hours'] >= threshold).sum())
+        n_any        = int((df['active_hours'] > 0).sum())
+        grid_hours   = int(df['active_hours'].sum())
+        busiest      = df.loc[df['active_hours'].idxmax()]
+        if grid_hours == 0:
+            weather_word, headline_color = 'quiet', '#2ca02c'
+        elif grid_hours < 100:
+            weather_word, headline_color = 'normal', COLOR_TEXT
+        elif grid_hours < 300:
+            weather_word, headline_color = 'busy', '#ff7f0e'
+        else:
+            weather_word, headline_color = 'very busy', '#ff3030'
+
+        st.markdown(
+            f"<div style='padding:18px 22px; border-radius:14px; "
+            f"background-color:{COLOR_SURFACE}; border:1px solid {COLOR_RING}; "
+            f"margin: 8px 0 18px 0;'>"
+            f"<div style='font-size:0.78rem; color:{COLOR_TEXT_MUTED}; "
+            f"text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px'>"
+            f"DAY · {date.strftime('%A %d %B %Y')}</div>"
+            f"<div style='font-size:1.4rem; font-family:Space Grotesk,Inter,sans-serif; "
+            f"font-weight:600; letter-spacing:-0.025em; line-height:1.2'>"
+            f"<span style='color:{headline_color}'>It was a {weather_word} day</span> "
+            f"<span style='color:{COLOR_TEXT_MUTED}'>·</span> "
+            f"<span style='color:{COLOR_TEXT}'>{n_any} of 175 substations had redispatch, "
+            f"{grid_hours} town-hours grid-wide</span></div>"
+            f"<div style='color:{COLOR_TEXT_MUTED}; margin-top:6px; font-size:0.92rem'>"
+            f"Busiest substation: <b style='color:{COLOR_TEXT}'>{busiest['town']}</b> "
+            f"with <b style='color:{COLOR_TEXT}'>{int(busiest['active_hours'])} active hours</b>. "
+            f"<b style='color:{COLOR_TEXT}'>{n_alerts}</b> substations were congested for "
+            f"≥{threshold} hours."
+            f"</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    if not animation_mode:
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric(f'Above {threshold}h', f"{n_alerts}")
+        k2.metric('Any redispatch today', f"{n_any}")
+        k3.metric('Most active town', f"{int(busiest['active_hours'])}h", busiest['town'])
+        k4.metric('Total town-hours', f"{grid_hours}")
+
     df['size_metric']   = df['active_hours'].clip(lower=0)
     df['display_size']  = np.where(
         df['active_hours'] >= threshold, df['size_metric'].clip(lower=2) * 1.6,
@@ -268,24 +317,49 @@ with tab_map:
     )
     df['display_opacity'] = np.where(df['active_hours'] >= threshold, 0.95, 0.35)
 
-    fig_map = px.scatter_mapbox(
-        df.sort_values('active_hours'),
-        lat='lat', lon='lon',
-        size='display_size',
-        color='active_hours',
-        color_continuous_scale=HEAT_SCALE,
-        range_color=[0, 24],
-        size_max=36,
-        hover_name='town',
-        hover_data={
-            'active_hours': True, 'n_events': True, 'peak_concurrency': True,
-            'dominant_reason': True, 'lat': False, 'lon': False,
-            'display_size': False, 'size_metric': False, 'display_opacity': False,
-            'active_15min_slots': False,
-        },
-        zoom=7.0, center={'lat': 54.3, 'lon': 9.7},
-        height=620,
-    )
+    if animation_mode:
+        fig_map = px.scatter_mapbox(
+            df.sort_values(['date', 'active_hours']),
+            lat='lat', lon='lon',
+            size='display_size',
+            color='active_hours',
+            color_continuous_scale=HEAT_SCALE,
+            range_color=[0, 24],
+            size_max=36,
+            animation_frame='date',
+            animation_group='town',
+            hover_name='town',
+            hover_data={
+                'active_hours': True, 'n_events': True, 'peak_concurrency': True,
+                'dominant_reason': True, 'date': True,
+                'lat': False, 'lon': False, 'display_size': False, 'size_metric': False,
+                'display_opacity': False, 'active_15min_slots': False,
+            },
+            mapbox_style='carto-positron',
+            zoom=7.0, center={'lat': 54.3, 'lon': 9.7},
+            height=620,
+        )
+    else:
+        fig_map = px.scatter_mapbox(
+            df.sort_values('active_hours'),
+            lat='lat', lon='lon',
+            size='display_size',
+            color='active_hours',
+            color_continuous_scale=HEAT_SCALE,
+            range_color=[0, 24],
+            size_max=36,
+            hover_name='town',
+            hover_data={
+                'active_hours': True, 'n_events': True, 'peak_concurrency': True,
+                'dominant_reason': True, 'lat': False, 'lon': False,
+                'display_size': False, 'size_metric': False, 'display_opacity': False,
+                'active_15min_slots': False,
+            },
+            mapbox_style='carto-positron',
+            zoom=7.0, center={'lat': 54.3, 'lon': 9.7},
+            height=620,
+        )
+
     fig_map.update_traces(
         marker=dict(opacity=df.sort_values('active_hours')['display_opacity']),
         hovertemplate=(
@@ -304,52 +378,52 @@ with tab_map:
             ticksuffix='h',
             tickvals=[0, 6, 12, 18, 24],
         ),
+        transition=dict(duration=200, easing='cubic-in-out'),
     )
     st.plotly_chart(fig_map, use_container_width=True)
 
-    # ------ leaderboard ------
-    st.markdown('### Top 15 most-congested substations today')
-    top = df.nlargest(15, 'active_hours').copy()
-    if (top['active_hours'] == 0).all():
-        st.info('No redispatch events anywhere on this date.')
-    else:
-        top.insert(0, '#', range(1, len(top) + 1))
-        leaderboard = top[['#', 'town', 'active_hours', 'n_events',
-                           'peak_concurrency', 'dominant_reason']].copy()
-        leaderboard = leaderboard.rename(columns={
-            'town':             'Town',
-            'active_hours':     'Active hours',
-            'n_events':         'Distinct events',
-            'peak_concurrency': 'Peak concurrent ops',
-            'dominant_reason':  'Dominant reason',
-        })
-        st.dataframe(
-            leaderboard.style.background_gradient(
-                cmap='YlOrRd', subset=['Active hours'], vmin=0, vmax=24,
-            ),
-            use_container_width=True, hide_index=True, height=560,
-        )
-
-        # CSV export
-        csv_buf = io.StringIO()
-        export = df.sort_values('active_hours', ascending=False)[
-            ['town', 'active_hours', 'n_events', 'peak_concurrency',
-             'dominant_reason', 'lat', 'lon']
-        ].copy()
-        export.insert(0, 'date', date)
-        export.to_csv(csv_buf, index=False)
-
-        col_dl1, col_dl2 = st.columns([1, 5])
-        with col_dl1:
-            st.download_button(
-                'Download CSV (all towns)',
-                data=csv_buf.getvalue(),
-                file_name=f'redispatch_{date}.csv',
-                mime='text/csv',
+    if not animation_mode:
+        st.markdown('### Top 15 most-congested substations today')
+        top = df.nlargest(15, 'active_hours').copy()
+        if (top['active_hours'] == 0).all():
+            st.info('No redispatch events anywhere on this date.')
+        else:
+            top.insert(0, '#', range(1, len(top) + 1))
+            leaderboard = top[['#', 'town', 'active_hours', 'n_events',
+                               'peak_concurrency', 'dominant_reason']].copy()
+            leaderboard = leaderboard.rename(columns={
+                'town':             'Town',
+                'active_hours':     'Active hours',
+                'n_events':         'Distinct events',
+                'peak_concurrency': 'Peak concurrent ops',
+                'dominant_reason':  'Dominant reason',
+            })
+            st.dataframe(
+                leaderboard.style.background_gradient(
+                    cmap='YlOrRd', subset=['Active hours'], vmin=0, vmax=24,
+                ),
+                use_container_width=True, hide_index=True, height=560,
             )
-        with col_dl2:
-            st.caption('Full grid for this date · sorted by active hours · '
-                       'lat/lon included for downstream maps.')
+
+            csv_buf = io.StringIO()
+            export = df.sort_values('active_hours', ascending=False)[
+                ['town', 'active_hours', 'n_events', 'peak_concurrency',
+                 'dominant_reason', 'lat', 'lon']
+            ].copy()
+            export.insert(0, 'date', date)
+            export.to_csv(csv_buf, index=False)
+
+            col_dl1, col_dl2 = st.columns([1, 5])
+            with col_dl1:
+                st.download_button(
+                    'Download CSV (all towns)',
+                    data=csv_buf.getvalue(),
+                    file_name=f'redispatch_{date}.csv',
+                    mime='text/csv',
+                )
+            with col_dl2:
+                st.caption('Full grid for this date · sorted by active hours · '
+                           'lat/lon included for downstream maps.')
 
 # =============================================================
 # TAB 2 — Town deep dive

@@ -43,7 +43,7 @@ KEEP_REASONS  = ('Netzengpass I', 'Netzengpass')   # dominant reasons only
 def load_and_clean() -> pd.DataFrame:
     files = sorted(OPS_DIR.glob('chunk_*.parquet'))
     if not files:
-        raise FileNotFoundError(f'no parquet chunks under {OPS_DIR}')
+        raise FileNotFoundError(f'no parquet chunks under data/raw/shn_operations_last_2y/')
     raw = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
     raw['start'] = pd.to_datetime(raw['start'])
     raw['end']   = pd.to_datetime(raw['end'])
@@ -166,7 +166,7 @@ def main():
     ts_long = aggregate_long(expanded)
     print(f'  long rows: {len(ts_long):,}')
     ts_long.to_parquet(OUT_LONG, index=False)
-    print(f'  wrote {OUT_LONG}')
+    print(f'  wrote data/processed/ts_15min_long.parquet')
 
     print('pivoting to wide (ts x town, dominant reasons only)...')
     print(f'  reasons kept: {KEEP_REASONS}')
@@ -175,7 +175,7 @@ def main():
     print(f'  ts range  : {wide.index.min()}  ->  {wide.index.max()}')
     print(f'  total active town-slots (>0): {int((wide > 0).values.sum()):,}')
     wide.to_parquet(OUT_WIDE)
-    print(f'  wrote {OUT_WIDE}')
+    print(f'  wrote data/processed/ts_15min_wide.parquet')
 
     print('\n=== top 10 towns by # of active slots (wide, dominant reasons) ===')
     print((wide > 0).sum().sort_values(ascending=False).head(10))

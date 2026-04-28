@@ -81,7 +81,7 @@ def score(target_date: pd.Timestamp) -> pd.DataFrame:
     # 1. load feature column order (single source of truth for inference)
     fcols_path = MODELS_DIR / 'feature_cols.json'
     if not fcols_path.exists():
-        print(f'[error] missing {fcols_path}. Did you run train.py?', file=sys.stderr)
+        print(f'[error] missing models/feature_cols.json. Did you run train.py?', file=sys.stderr)
         sys.exit(2)                                           # config error
     with open(fcols_path) as f:
         fcols = json.load(f)
@@ -208,8 +208,8 @@ def main():
 
     if not args.quiet:
         print_summary(df, args.threshold)
-        print(f'wrote {out_path}')
-        print(f'wrote {latest_path}  (copy of the most recent run)')
+        print(f'wrote data/predictions/predictions_{target.date()}.parquet')
+        print(f'wrote data/predictions/latest.parquet  (copy of the most recent run)')
 
 
 if __name__ == '__main__':

@@ -160,7 +160,7 @@ def main():
         json.dump(feat_cols, f)
     with open(MODELS_DIR / 'metrics.json', 'w') as f:
         json.dump(all_metrics, f, indent=2)
-    print(f'\nwrote models/* under {MODELS_DIR}')
+    print(f'\nwrote models/* under models/')
 
 
 if __name__ == '__main__':

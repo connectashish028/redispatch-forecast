@@ -177,7 +177,7 @@ def main():
     print('column dtypes:')
     print(base.dtypes)
 
-    print(f'\nwriting {OUT_PATH}...')
+    print(f'\\nwriting data/processed/features.parquet...')
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     base.to_parquet(OUT_PATH, index=False)
     print('done.')
