@@ -1,8 +1,7 @@
 # Redispatch Visualization Dashboard — Schleswig-Holstein
 
 > **v1.0** — historical visualization of redispatch activity across the SHN
-> distribution grid. **No model predictions in v1.** Predictions ship in v2;
-> the underlying ML pipeline lives in [`src/v2/`](src/v2/README.md).
+> distribution grid. **No model predictions in v1.**
 
 ## What it shows
 
@@ -63,48 +62,26 @@ Secondary metrics shown alongside (in tooltips and tables, never on the map):
 │
 ├── src/                            v1 visualization code
 │   ├── build_timeseries.py         raw parquets -> 15-min activity matrix
-│   ├── smard_client.py             SMARD API client (used by v2)
-│   ├── weather_client.py           Open-Meteo client (used by v2)
+│   ├── smard_client.py             SMARD API client
+│   ├── weather_client.py           Open-Meteo client
 │   ├── fetcher.py                  cache helper for SMARD + weather
-│   ├── theme.py                    Framer-inspired colours, CSS, Plotly template
-│   └── v2/                         day-ahead prediction work-in-progress
-│       └── README.md               details + v2 roadmap
+│   └── theme.py                    Framer-inspired colours, CSS, Plotly template
 │
 ├── notebooks/
-│   ├── 01_sanity_check.ipynb       data quality + grid-analyst exploration
-│   └── v2/predict_demo.ipynb       prediction prototype walkthrough (v2)
+│   └── 01_sanity_check.ipynb       data quality + grid-analyst exploration
 │
-├── data/                           (gitignored, regenerable)
-│   ├── raw/shn_operations_last_2y/
-│   ├── external/towns_geo.parquet
-│   └── processed/ts_15min_*.parquet
-│
-└── models/                         (gitignored, v2 artifacts only)
+└── data/                           (gitignored, regenerable)
+    ├── raw/shn_operations_last_2y/
+    ├── external/towns_geo.parquet
+    └── processed/ts_15min_*.parquet
 ```
-
-## v2 roadmap (deferred from v1)
-
-A full LightGBM-based day-ahead probability forecast prototype lives under
-`src/v2/`. It runs end-to-end and gets 4-5× lift over baseline on a held-out
-test set. Before it can shipped, six items remain:
-
-1. **Live forecast pipeline.** `src/v2/score_today.py` works against cached
-   features today. Needs an upstream live-data fetcher.
-2. **Forecast-vintage features.** Replace SMARD/weather actuals with
-   day-ahead forecast vintages to remove train/serve skew.
-3. **Per-town isotonic calibration.** Closes the 15-25pp under-prediction
-   gap at chronically-busy coast towns.
-4. **Naive baselines.** Persistence, last-7-days-same-hour, base-rate.
-   Required so we can prove the model beats simple heuristics.
-5. **Smoke tests.** Lock in PR-AUC floors and CLI contracts.
-6. **Schema validation** on raw parquets so upstream renames fail clearly.
 
 ## Reproducibility
 
 Everything is deterministic given the raw parquet chunks under
 `data/raw/shn_operations_last_2y/` and the Open-Meteo / SMARD caches under
-`data/external/`. A full rebuild from scratch (timeseries → features →
-optionally train) takes about 15 minutes on a 16 GB laptop.
+`data/external/`. A full rebuild of the timeseries takes a couple of minutes
+on a 16 GB laptop.
 
 ## Limitations
 
