@@ -49,7 +49,7 @@ hours had at least one redispatch event overlapping each of those 14 hours.
 Secondary metrics shown alongside (in tooltips and tables, never on the map):
 - Number of distinct redispatch operations that day
 - Peak concurrent ops at the busiest 15-min slot
-- Dominant reason (Netzengpass / Netzengpass I)
+- Dominant reason (Netzengpass / Netzengpass I) -  Grid Congestion
 
 ## Repo layout
 
@@ -86,7 +86,7 @@ Secondary metrics shown alongside (in tooltips and tables, never on the map):
 
 A full LightGBM-based day-ahead probability forecast prototype lives under
 `src/v2/`. It runs end-to-end and gets 4-5× lift over baseline on a held-out
-test set. Before it can ship to operators, six items remain:
+test set. Before it can shipped, six items remain:
 
 1. **Live forecast pipeline.** `src/v2/score_today.py` works against cached
    features today. Needs an upstream live-data fetcher.
@@ -98,8 +98,6 @@ test set. Before it can ship to operators, six items remain:
    Required so we can prove the model beats simple heuristics.
 5. **Smoke tests.** Lock in PR-AUC floors and CLI contracts.
 6. **Schema validation** on raw parquets so upstream renames fail clearly.
-
-Tagged `v0.9-prediction-prototype` in git for reference.
 
 ## Reproducibility
 
