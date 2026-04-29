@@ -228,7 +228,7 @@ def register_plotly_template():
                         borderwidth=1, font=dict(color=COLOR_TEXT)),
             hoverlabel=dict(bgcolor=COLOR_SURFACE, bordercolor=COLOR_ACCENT,
                             font=dict(family='Inter', color=COLOR_TEXT, size=12)),
-            mapbox=dict(style='carto-positron'),
+            map=dict(style='carto-positron'),
         )
     )
     pio.templates['framer_dark'] = template

@@ -318,7 +318,7 @@ with tab_map:
     df['display_opacity'] = np.where(df['active_hours'] >= threshold, 0.95, 0.35)
 
     if animation_mode:
-        fig_map = px.scatter_mapbox(
+        fig_map = px.scatter_map(
             df.sort_values(['date', 'active_hours']),
             lat='lat', lon='lon',
             size='display_size',
@@ -335,12 +335,12 @@ with tab_map:
                 'lat': False, 'lon': False, 'display_size': False, 'size_metric': False,
                 'display_opacity': False, 'active_15min_slots': False,
             },
-            mapbox_style='carto-positron',
+            map_style='carto-positron',
             zoom=7.0, center={'lat': 54.3, 'lon': 9.7},
             height=620,
         )
     else:
-        fig_map = px.scatter_mapbox(
+        fig_map = px.scatter_map(
             df.sort_values('active_hours'),
             lat='lat', lon='lon',
             size='display_size',
@@ -355,7 +355,7 @@ with tab_map:
                 'display_size': False, 'size_metric': False, 'display_opacity': False,
                 'active_15min_slots': False,
             },
-            mapbox_style='carto-positron',
+            map_style='carto-positron',
             zoom=7.0, center={'lat': 54.3, 'lon': 9.7},
             height=620,
         )
