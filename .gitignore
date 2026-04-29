@@ -20,13 +20,19 @@ env/
 Thumbs.db
 
 # --- Project data ---
-# Raw parquets are big and re-fetchable; do not commit
-data/raw/
-# Use /* so git descends into these and the ! exceptions below take effect
+# Use /* (not trailing slash) so git descends and the ! exceptions take effect.
+data/raw/*
 data/external/*
 data/processed/*
 
-# Exception: the small processed files the v1 dashboard needs to start cold
+# Re-include the SHN chunks subdirectory and its parquet files, so the daily
+# refresh workflow can rebuild processed parquets from the full history.
+# One-time bootstrap of 1,967 historical chunks (~50 MB) + ~25 KB per day after.
+!data/raw/shn_operations_last_2y/
+data/raw/shn_operations_last_2y/*
+!data/raw/shn_operations_last_2y/chunk_*.parquet
+
+# Re-include the small processed files the dashboard needs to start cold.
 !data/external/towns_geo.parquet
 !data/processed/ts_15min_wide.parquet
 !data/processed/ts_15min_long.parquet

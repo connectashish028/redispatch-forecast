@@ -1,0 +1,68 @@
+name: Daily SHN data refresh
+
+# Runs once a day, fetches new redispatch ops from Connect+, rebuilds the
+# processed parquets, and pushes back to main. Streamlit Cloud picks up the
+# push and redeploys automatically.
+
+on:
+  schedule:
+    # 04:30 UTC every day = 06:30 CEST in summer / 05:30 CET in winter,
+    # which is right after most early-morning ops are published and well
+    # before any working-hours visitors hit the dashboard.
+    - cron: '30 4 * * *'
+  workflow_dispatch:        # also lets you trigger manually from the Actions tab
+
+permissions:
+  contents: write           # the job pushes commits back to the repo
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false # never cancel a running refresh; let it finish
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # default fetch-depth=1 is fine — we don't need the full git history
+          # for either fetch or rebuild
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Slim install — only what fetch_shn_ops + build_timeseries need
+          pip install pandas numpy pyarrow requests
+
+      - name: Fetch new SHN ops
+        run: python src/fetch_shn_ops.py --max-chunks 25
+
+      - name: Rebuild processed parquets
+        run: python src/build_timeseries.py
+
+      - name: Commit and push if anything changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/raw/shn_operations_last_2y/chunk_*.parquet \
+                  data/processed/ts_15min_wide.parquet \
+                  data/processed/ts_15min_long.parquet
+
+          if git diff --cached --quiet; then
+            echo "No data changes — nothing to commit."
+          else
+            git commit -m "Daily refresh $(date -u +%Y-%m-%d)"
+            git push
+            echo "Pushed daily refresh."
+          fi
