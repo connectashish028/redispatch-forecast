@@ -314,22 +314,31 @@ with tab_map:
         k3.metric('Most active town', f"{int(busiest['active_hours'])}h", busiest['town'])
         k4.metric('Total town-hours', f"{grid_hours}")
 
-    # sqrt-scaled bubbles: small differences at the low end stay visible, the
-    # 24h max doesn't dwarf the 4h tier. Floor of 0.6 so 0h towns are still
-    # rendered as a tiny dot (not invisible).
-    df['size_metric'] = np.sqrt(df['active_hours'].clip(lower=0)) + 0.6
-    df['display_size'] = np.where(
-        df['active_hours'] >= threshold,
-        df['size_metric'] * 1.4,
-        df['size_metric'] * 0.85,
+    # Only render bubbles where something actually happened. Plotly's
+    # scatter_map normalises bubble size by the data's max — on quiet days
+    # (every town = 0 active hours) the floor value blows up to size_max,
+    # painting cream blobs everywhere. Filtering avoids the visual lie.
+    # The full 175-substation backdrop is added as a separate gray-dot trace
+    # below so the grid context stays visible.
+    df_active = df[df['active_hours'] > 0].copy()
+    df_active['size_metric'] = np.sqrt(df_active['active_hours']) + 0.6
+    df_active['display_size'] = np.where(
+        df_active['active_hours'] >= threshold,
+        df_active['size_metric'] * 1.4,
+        df_active['size_metric'] * 0.85,
     )
-    # 0.55 instead of 0.35 keeps non-alert towns visible on the light tiles
-    # without competing with the red alert bubbles.
-    df['display_opacity'] = np.where(df['active_hours'] >= threshold, 0.95, 0.55)
+    df_active['display_opacity'] = np.where(
+        df_active['active_hours'] >= threshold, 0.95, 0.65,
+    )
 
     if animation_mode:
+        # Animation needs the full per-day per-town frame structure, but we
+        # still hide rows with zero activity — those just become empty frames.
+        anim_df = df[df['active_hours'] > 0].copy() if 'date' in df.columns else df_active
+        anim_df['size_metric'] = np.sqrt(anim_df['active_hours']) + 0.6
+        anim_df['display_size'] = anim_df['size_metric']
         fig_map = px.scatter_map(
-            df.sort_values(['date', 'active_hours']),
+            anim_df.sort_values(['date', 'active_hours']),
             lat='lat', lon='lon',
             size='display_size',
             color='active_hours',
@@ -343,15 +352,38 @@ with tab_map:
                 'active_hours': True, 'n_events': True, 'peak_concurrency': True,
                 'dominant_reason': True, 'date': True,
                 'lat': False, 'lon': False, 'display_size': False, 'size_metric': False,
-                'display_opacity': False, 'active_15min_slots': False,
+                'active_15min_slots': False,
             },
             map_style='carto-positron',
             zoom=7.0, center={'lat': 54.3, 'lon': 9.7},
             height=620,
         )
+    elif df_active.empty:
+        # Quiet day: bare map with the substation backdrop and a centred
+        # "no activity" annotation. No heat bubbles, no misleading colorscale.
+        fig_map = go.Figure(go.Scattermap(
+            lat=df['lat'], lon=df['lon'],
+            mode='markers',
+            marker=dict(size=4, color='rgba(150, 150, 150, 0.45)',
+                        allowoverlap=True),
+            hoverinfo='text',
+            text=df['town'],
+            showlegend=False,
+        ))
+        fig_map.add_annotation(
+            text='No redispatch on this day across the SHN grid.',
+            xref='paper', yref='paper', x=0.5, y=0.5, showarrow=False,
+            font=dict(size=14, color='#444'),
+            bgcolor='rgba(255, 255, 255, 0.85)', borderpad=8, borderwidth=0,
+        )
+        fig_map.update_layout(
+            map=dict(style='carto-positron',
+                     center=dict(lat=54.3, lon=9.7), zoom=7.0),
+            height=620,
+        )
     else:
         fig_map = px.scatter_map(
-            df.sort_values('active_hours'),
+            df_active.sort_values('active_hours'),
             lat='lat', lon='lon',
             size='display_size',
             color='active_hours',
@@ -369,17 +401,45 @@ with tab_map:
             zoom=7.0, center={'lat': 54.3, 'lon': 9.7},
             height=620,
         )
+        # Substation backdrop: every town as a tiny gray dot, drawn behind the
+        # heat bubbles so the audience sees grid coverage even on calm days.
+        df_idle = df[df['active_hours'] == 0]
+        if not df_idle.empty:
+            fig_map.add_trace(go.Scattermap(
+                lat=df_idle['lat'], lon=df_idle['lon'],
+                mode='markers',
+                marker=dict(size=4, color='rgba(150, 150, 150, 0.4)',
+                            allowoverlap=True),
+                hoverinfo='text',
+                text=df_idle['town'],
+                showlegend=False,
+                name='idle_backdrop',
+            ))
+            # Send backdrop to the back so heat bubbles render on top.
+            fig_map.data = (fig_map.data[-1],) + fig_map.data[:-1]
 
-    fig_map.update_traces(
-        marker=dict(opacity=df.sort_values('active_hours')['display_opacity']),
-        hovertemplate=(
-            '<b>%{hovertext}</b><br>'
-            'Active hours: <b>%{customdata[0]}h</b><br>'
-            'Distinct events: %{customdata[1]}<br>'
-            'Peak concurrent ops: %{customdata[2]}<br>'
-            'Dominant reason: %{customdata[3]}<extra></extra>'
-        ),
-    )
+    if not df_active.empty and not animation_mode:
+        fig_map.update_traces(
+            marker=dict(opacity=df_active.sort_values('active_hours')['display_opacity']),
+            hovertemplate=(
+                '<b>%{hovertext}</b><br>'
+                'Active hours: <b>%{customdata[0]}h</b><br>'
+                'Distinct events: %{customdata[1]}<br>'
+                'Peak concurrent ops: %{customdata[2]}<br>'
+                'Dominant reason: %{customdata[3]}<extra></extra>'
+            ),
+            selector=dict(name=None),  # only the px-built heat trace, not the backdrop
+        )
+    elif animation_mode:
+        fig_map.update_traces(
+            hovertemplate=(
+                '<b>%{hovertext}</b><br>'
+                'Active hours: <b>%{customdata[0]}h</b><br>'
+                'Distinct events: %{customdata[1]}<br>'
+                'Peak concurrent ops: %{customdata[2]}<br>'
+                'Dominant reason: %{customdata[3]}<extra></extra>'
+            ),
+        )
     fig_map.update_layout(
         margin=dict(l=0, r=0, t=10, b=0),
         coloraxis_colorbar=dict(
@@ -394,8 +454,8 @@ with tab_map:
     # Alert halo: a soft red glow drawn behind alert towns so they pop without
     # the heavy "outlined dot" look. Static view only — animation frames don't
     # play nicely with extra traces, and the visual cue there is movement.
-    if not animation_mode:
-        alerts = df[df['active_hours'] >= threshold]
+    if not animation_mode and not df_active.empty:
+        alerts = df_active[df_active['active_hours'] >= threshold]
         if not alerts.empty:
             halo_px = (np.sqrt(alerts['active_hours']) + 0.6) * 14 + 10
             fig_map.add_trace(go.Scattermap(

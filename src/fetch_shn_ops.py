@@ -201,9 +201,23 @@ def main():
     for c in text_cols:
         new_df[c] = new_df[c].astype('string')
 
+    # Append-safe write: if a chunk already exists for `today` (same UTC date),
+    # merge it with what we just fetched and dedupe by op `id`. Without this,
+    # a same-day re-run (e.g. cron firing twice or after a manual fetch) would
+    # OVERWRITE the file and silently lose ops that arrived earlier in the day.
+    if out_path.exists():
+        existing = pd.read_parquet(out_path)
+        before = len(existing)
+        combined = (pd.concat([existing, new_df], ignore_index=True)
+                      .drop_duplicates(subset='id', keep='last')
+                      .reset_index(drop=True))
+        new_df = combined
+        print(f'[merge] existing {out_path.name} had {before:,} ops; '
+              f'after merge: {len(new_df):,}')
+
     new_df.to_parquet(out_path, index=False)
     print(f'[done] wrote {len(new_df):,} ops to {out_path}')
-    print(f'[done] start range: {range_lo} -> {range_hi}')
+    print(f'[done] new-batch start range: {range_lo} -> {range_hi}')
 
 
 if __name__ == '__main__':
