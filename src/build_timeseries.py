@@ -33,7 +33,11 @@ OUT_WIDE      = OUT_DIR / 'ts_15min_wide.parquet'
 OUT_LONG      = OUT_DIR / 'ts_15min_long.parquet'
 
 START_CUTOFF  = pd.Timestamp('2024-01-01')
-END_CUTOFF    = pd.Timestamp('2026-04-23')
+# END_CUTOFF is auto-detected in load_and_clean(): one day past the latest op
+# we have on disk, so build_timeseries always covers everything fetched so far
+# without manual edits. Override with a hard date here only if you need a fixed
+# evaluation window.
+END_CUTOFF    = None
 WEEK_MIN      = 7 * 24 * 60
 SLOT          = pd.Timedelta(minutes=15)
 TEST_REASON   = 'Funktionsnachweis'
@@ -45,10 +49,17 @@ def load_and_clean() -> pd.DataFrame:
     if not files:
         raise FileNotFoundError(f'no parquet chunks under data/raw/shn_operations_last_2y/')
     raw = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
-    raw['start'] = pd.to_datetime(raw['start'])
-    raw['end']   = pd.to_datetime(raw['end'])
+    # ISO8601 covers both 'YYYY-MM-DD HH:MM:SS' and 'YYYY-MM-DDTHH:MM:SS' so
+    # historical chunks (space) and freshly-fetched chunks (T) coexist cleanly.
+    raw['start'] = pd.to_datetime(raw['start'], format='ISO8601')
+    raw['end']   = pd.to_datetime(raw['end'],   format='ISO8601')
 
-    df = raw[(raw['start'] >= START_CUTOFF) & (raw['start'] < END_CUTOFF)].copy()
+    # Auto-detect upper bound: one day past the latest op we have, floored to the
+    # day boundary. Falls back to the module-level constant if the user pinned one.
+    upper = END_CUTOFF if END_CUTOFF is not None \
+        else (raw['start'].max().normalize() + pd.Timedelta(days=1))
+    print(f'  window: {START_CUTOFF} -> {upper}')
+    df = raw[(raw['start'] >= START_CUTOFF) & (raw['start'] < upper)].copy()
     df = df.drop(columns=['srId', 'Reason'], errors='ignore')
     df = df[df['location'] != 'UW']
 
@@ -134,8 +145,11 @@ def pivot_wide(expanded: pd.DataFrame) -> pd.DataFrame:
 
     wide = counts.pivot(index='ts', columns='town', values='active_ops')
 
-    # full 15-min grid so gaps are explicit zeros, not missing rows
-    full_idx = pd.date_range(START_CUTOFF, END_CUTOFF - SLOT, freq=SLOT)
+    # full 15-min grid so gaps are explicit zeros, not missing rows.
+    # Upper bound is the latest slot present in the data — auto-extends as we
+    # fetch new chunks, no manual edit needed.
+    upper = expanded['ts'].max()
+    full_idx = pd.date_range(START_CUTOFF, upper, freq=SLOT)
     wide = wide.reindex(full_idx).fillna(0).astype('int16')
     wide.index.name = 'ts'
     wide.columns.name = None
