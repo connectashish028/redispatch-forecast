@@ -27,6 +27,7 @@ COLOR_FROSTED     = 'rgba(255, 255, 255, 0.08)'
 COLOR_GRID        = 'rgba(255, 255, 255, 0.06)'
 
 # Probability heat scale (cool -> hot) that pops on pure black.
+# Used for the Tab 2 heatmap (dark Plotly background).
 HEAT_SCALE = [
     [0.00, 'rgba(10, 10, 10, 0)'],   # near black for ~0%
     [0.10, '#1f3a5f'],   # deep blue
@@ -34,6 +35,18 @@ HEAT_SCALE = [
     [0.55, '#ff7f0e'],   # orange
     [0.80, '#ff3030'],   # bright red
     [1.00, '#ffeb3b'],   # high alert yellow
+]
+
+# Light-tile heat scale, for the daily map (`map_style='carto-positron'`).
+# ColorBrewer YlOrRd ramp — pale cream at 0h stays visible on light tiles,
+# climbs through orange to deep red at 24h. Standard for severity maps.
+HEAT_SCALE_MAP = [
+    [0.00, '#FEF0D9'],
+    [0.20, '#FDD49E'],
+    [0.40, '#FDBB84'],
+    [0.60, '#FC8D59'],
+    [0.80, '#E34A33'],
+    [1.00, '#B30000'],
 ]
 
 

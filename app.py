@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 from theme import (inject_css, register_plotly_template,        # noqa: E402
                    COLOR_BG, COLOR_SURFACE, COLOR_TEXT,
                    COLOR_TEXT_MUTED, COLOR_ACCENT,
-                   COLOR_RING, HEAT_SCALE)
+                   COLOR_RING, HEAT_SCALE, HEAT_SCALE_MAP)
 
 st.set_page_config(
     page_title='Redispatch Visualization - SHN',
@@ -253,13 +253,17 @@ with tab_map:
             unsafe_allow_html=True,
         )
     else:
-        if 'sel_date' not in st.session_state:
-            st.session_state.sel_date = pd.Timestamp(date_hi).date()
-
+        # `value=` is the first-render default; `key=` makes the widget
+        # persist user changes across reruns. Pre-seeding session_state and
+        # passing `value=` is what Streamlit warns about — pick one.
         c1, c2 = st.columns([1.2, 3])
         with c1:
-            date = st.date_input('Date', value=st.session_state.sel_date,
-                                 min_value=date_lo, max_value=date_hi, key='sel_date')
+            date = st.date_input(
+                'Date',
+                value=pd.Timestamp(date_hi).date(),
+                min_value=date_lo, max_value=date_hi,
+                key='sel_date',
+            )
         with c2:
             threshold = st.slider('Highlight towns above (hours active)', 0, 24, 4, step=1)
 
@@ -310,12 +314,18 @@ with tab_map:
         k3.metric('Most active town', f"{int(busiest['active_hours'])}h", busiest['town'])
         k4.metric('Total town-hours', f"{grid_hours}")
 
-    df['size_metric']   = df['active_hours'].clip(lower=0)
-    df['display_size']  = np.where(
-        df['active_hours'] >= threshold, df['size_metric'].clip(lower=2) * 1.6,
-        df['size_metric'].clip(lower=2) * 0.7,
+    # sqrt-scaled bubbles: small differences at the low end stay visible, the
+    # 24h max doesn't dwarf the 4h tier. Floor of 0.6 so 0h towns are still
+    # rendered as a tiny dot (not invisible).
+    df['size_metric'] = np.sqrt(df['active_hours'].clip(lower=0)) + 0.6
+    df['display_size'] = np.where(
+        df['active_hours'] >= threshold,
+        df['size_metric'] * 1.4,
+        df['size_metric'] * 0.85,
     )
-    df['display_opacity'] = np.where(df['active_hours'] >= threshold, 0.95, 0.35)
+    # 0.55 instead of 0.35 keeps non-alert towns visible on the light tiles
+    # without competing with the red alert bubbles.
+    df['display_opacity'] = np.where(df['active_hours'] >= threshold, 0.95, 0.55)
 
     if animation_mode:
         fig_map = px.scatter_map(
@@ -323,9 +333,9 @@ with tab_map:
             lat='lat', lon='lon',
             size='display_size',
             color='active_hours',
-            color_continuous_scale=HEAT_SCALE,
+            color_continuous_scale=HEAT_SCALE_MAP,
             range_color=[0, 24],
-            size_max=36,
+            size_max=40,
             animation_frame='date',
             animation_group='town',
             hover_name='town',
@@ -345,9 +355,9 @@ with tab_map:
             lat='lat', lon='lon',
             size='display_size',
             color='active_hours',
-            color_continuous_scale=HEAT_SCALE,
+            color_continuous_scale=HEAT_SCALE_MAP,
             range_color=[0, 24],
-            size_max=36,
+            size_max=40,
             hover_name='town',
             hover_data={
                 'active_hours': True, 'n_events': True, 'peak_concurrency': True,
@@ -380,6 +390,30 @@ with tab_map:
         ),
         transition=dict(duration=200, easing='cubic-in-out'),
     )
+
+    # Alert halo: a soft red glow drawn behind alert towns so they pop without
+    # the heavy "outlined dot" look. Static view only — animation frames don't
+    # play nicely with extra traces, and the visual cue there is movement.
+    if not animation_mode:
+        alerts = df[df['active_hours'] >= threshold]
+        if not alerts.empty:
+            halo_px = (np.sqrt(alerts['active_hours']) + 0.6) * 14 + 10
+            fig_map.add_trace(go.Scattermap(
+                lat=alerts['lat'],
+                lon=alerts['lon'],
+                mode='markers',
+                marker=dict(
+                    size=halo_px,
+                    color='rgba(179, 0, 0, 0.18)',
+                    allowoverlap=True,
+                ),
+                hoverinfo='skip',
+                showlegend=False,
+                name='alert_halo',
+            ))
+            # Reorder so the halo is drawn first (i.e. behind the bubbles).
+            fig_map.data = (fig_map.data[-1],) + fig_map.data[:-1]
+
     st.plotly_chart(fig_map, use_container_width=True)
 
     if not animation_mode:
