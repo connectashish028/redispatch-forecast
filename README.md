@@ -1,5 +1,10 @@
 # Redispatch in Schleswig-Holstein
 
+[![tests](https://github.com/connectashish028/redispatch-forecast/actions/workflows/tests.yml/badge.svg)](https://github.com/connectashish028/redispatch-forecast/actions/workflows/tests.yml)
+[![Daily refresh](https://github.com/connectashish028/redispatch-forecast/actions/workflows/refresh-data.yml/badge.svg)](https://github.com/connectashish028/redispatch-forecast/actions/workflows/refresh-data.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
+
 > Where, when, and **why** the SHN grid has had to step in.
 > A live dashboard over Schleswig-Holstein's 110 kV distribution network.
 
@@ -219,6 +224,20 @@ for the entire history) ships in git.
   vintages so train/serve skew goes to zero.
 
 ---
+
+## Tests
+
+Pytest suite covers the math invariants of the driver-attribution pipeline
+(group coverage, TreeSHAP-sum reconstruction, daily-summary round-trip).
+Runs in under 2 seconds; CI runs on every push.
+
+```bash
+pytest tests/ -v
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## Reproducibility
 

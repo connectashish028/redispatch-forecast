@@ -15,6 +15,9 @@ streamlit-folium>=0.15
 jupyter
 ipykernel
 
+# Testing
+pytest>=7.0
+
 # v2 prediction stack (optional; only needed to run anything under src/v2/)
 lightgbm>=4.0
 scikit-learn>=1.3

@@ -1,0 +1,37 @@
+name: tests
+
+# Run pytest on every push + PR. Uses the same dependency set as the
+# daily-refresh workflow so we catch any version drift early.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Slim install — just what the unit tests need (driver_attribution
+          # is pure pandas/numpy; build_daily_summary needs pyarrow). No
+          # streamlit, plotly, or lightgbm required to run the suite.
+          pip install pandas numpy pyarrow pytest
+
+      - name: Run pytest
+        run: pytest tests/ -v --tb=short
