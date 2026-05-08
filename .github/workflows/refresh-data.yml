@@ -38,6 +38,51 @@ jobs:
           # for either fetch or rebuild
           fetch-depth: 1
 
+      - name: Sanity-check the checkout
+        # Two earlier runs found '[fetcher] no cache' even though the cache
+        # file is committed on origin. This step prints a quick inventory so
+        # we can see exactly what the runner has, which file is missing if
+        # any, and stops the workflow early if a critical asset is absent
+        # (saves the 15-min full SMARD refetch).
+        run: |
+          echo "--- pwd / commit ---"
+          pwd
+          git rev-parse HEAD
+          echo "--- data/external/ ---"
+          ls -la data/external/ || echo "DIR MISSING"
+          echo "--- data/raw/shn_operations_last_2y/ (first 5) ---"
+          ls -la data/raw/shn_operations_last_2y/ 2>/dev/null | head -8
+          echo "--- chunks total ---"
+          ls data/raw/shn_operations_last_2y/ 2>/dev/null | wc -l
+          echo "--- models/ ---"
+          ls -la models/ 2>/dev/null || echo "DIR MISSING"
+          echo "--- daily summary ---"
+          ls -la data/predictions/ 2>/dev/null || echo "DIR MISSING"
+          echo "--- critical-file presence check ---"
+          missing=0
+          for f in \
+            data/external/smard_weather_2024_to_mar2026.parquet \
+            data/external/towns_geo.parquet \
+            data/external/shn_grid.geojson \
+            data/processed/ts_15min_wide.parquet \
+            models/feature_cols.json \
+            models/model_y_24h.txt; do
+            if [ -f "$f" ]; then
+              echo "  PRESENT  $f  ($(stat -c%s "$f") bytes)"
+            else
+              echo "  MISSING  $f"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo ""
+            echo "ERROR: $missing critical file(s) missing from the runner workspace."
+            echo "These files ARE tracked on origin/main; their absence here points"
+            echo "to a checkout / .gitignore / sparse-checkout problem rather than"
+            echo "a real data issue. Failing fast to avoid a 15-min full refetch."
+            exit 1
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
