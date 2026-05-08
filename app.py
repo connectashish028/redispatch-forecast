@@ -995,36 +995,14 @@ with tab_map:
         if attribution is None:
             window = _attribution_window()
             if window is None:
+                st.info(f"Not available for **{date}**.", icon='ℹ️')
+            else:
+                w_hi = window[1]
                 st.info(
-                    f"Driver attribution unavailable for **{date}** — the "
-                    f"daily attribution summary isn't on disk. The next "
-                    f"scheduled data refresh will publish it.",
+                    f"Not available for **{date}** — try **{w_hi}**, the "
+                    f"latest date with driver attribution.",
                     icon='ℹ️',
                 )
-            else:
-                w_lo, w_hi = window
-                if str(date) > w_hi:
-                    st.info(
-                        f"Driver attribution for **{date}** isn't published yet "
-                        f"— the daily refresh has caught up to **{w_hi}** so far. "
-                        f"It runs once a day around 04:30 UTC; today's "
-                        f"attribution typically appears the morning after.",
-                        icon='ℹ️',
-                    )
-                elif str(date) < w_lo:
-                    st.info(
-                        f"Driver attribution unavailable for **{date}** — the "
-                        f"published summary covers **{w_lo} → {w_hi}**. "
-                        f"Pick a date inside that window to see drivers.",
-                        icon='ℹ️',
-                    )
-                else:
-                    st.info(
-                        f"Driver attribution for **{date}** is missing from "
-                        f"the summary file (covers **{w_lo} → {w_hi}**). The "
-                        f"next daily refresh should fill the gap.",
-                        icon='ℹ️',
-                    )
         else:
             typical = max(typical_day_volume(), 1)
             ratio   = grid_hours / typical
