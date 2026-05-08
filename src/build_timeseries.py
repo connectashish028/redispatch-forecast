@@ -32,11 +32,15 @@ OUT_DIR       = ROOT / 'data' / 'processed'
 OUT_WIDE      = OUT_DIR / 'ts_15min_wide.parquet'
 OUT_LONG      = OUT_DIR / 'ts_15min_long.parquet'
 
-START_CUTOFF  = pd.Timestamp('2024-01-01')
+# START_CUTOFF auto-derives from `today - WINDOW_DAYS` so the built
+# timeseries grid stays aligned with what we actually keep in the repo.
+# To pin a fixed evaluation window, hard-code a pd.Timestamp here.
+WINDOW_DAYS   = 180
+START_CUTOFF  = (pd.Timestamp.today().normalize()
+                 - pd.Timedelta(days=WINDOW_DAYS))
 # END_CUTOFF is auto-detected in load_and_clean(): one day past the latest op
 # we have on disk, so build_timeseries always covers everything fetched so far
-# without manual edits. Override with a hard date here only if you need a fixed
-# evaluation window.
+# without manual edits.
 END_CUTOFF    = None
 WEEK_MIN      = 7 * 24 * 60
 SLOT          = pd.Timedelta(minutes=15)
