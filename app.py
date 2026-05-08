@@ -279,25 +279,14 @@ def _bucket_of(intensity: float) -> int:
 
 
 @st.cache_data
-def line_intensity_panel(end_date_str: str, days_back: int) -> dict:
-    """Build all per-frame line-bucket coordinate arrays for the animation.
-
-    Resolution auto-selects: hourly for windows ≤14 days, daily for longer.
-    Each frame yields five lat/lon arrays (one per bucket) with `None`
-    separators between segments — drop straight into a go.Scattermap.
-
-    Returns:
-        {
-            'frame_labels': [...ordered ts labels...],
-            'resolution':   'hourly' | 'daily',
-            'static_lats':  [...all-line backdrop lats...],
-            'static_lons':  [...all-line backdrop lons...],
-            'frames':       {ts_label: [(lats0, lons0), ..., (lats4, lons4)]}
-        }
-    """
+def _line_intensity_panel_impl(d_lo: pd.Timestamp, d_hi: pd.Timestamp,
+                                resolution: str) -> dict:
+    """Internal — build per-frame line-bucket coordinate arrays for any
+    half-open window [d_lo, d_hi) at the given resolution ('hourly' or
+    'daily'). Cached by the public wrappers below."""
     topo = load_topology()
     if topo['n_lines'] == 0:
-        return {'frame_labels': [], 'resolution': 'hourly',
+        return {'frame_labels': [], 'resolution': resolution,
                 'static_lats': [], 'static_lons': [], 'frames': {}}
 
     idx = line_to_nearest_towns(threshold_km=10.0)
@@ -307,20 +296,16 @@ def line_intensity_panel(end_date_str: str, days_back: int) -> dict:
     n_lines     = M.shape[0]
 
     wide = load_data()['wide']
-    d_hi = pd.Timestamp(end_date_str).normalize() + pd.Timedelta(days=1)
-    d_lo = d_hi - pd.Timedelta(days=days_back)
     sub = wide.loc[(wide.index >= d_lo) & (wide.index < d_hi)]
     if sub.empty:
-        return {'frame_labels': [], 'resolution': 'hourly',
+        return {'frame_labels': [], 'resolution': resolution,
                 'static_lats': [], 'static_lons': [], 'frames': {}}
 
-    if days_back <= 14:
+    if resolution == 'hourly':
         peak = sub.resample('1h').max()
-        resolution = 'hourly'
         fmt = '%a %d %b · %H:00'
     else:
         peak = sub.resample('1D').max()
-        resolution = 'daily'
         fmt = '%a %d %b'
     peak.index = peak.index.strftime(fmt)
     peak = peak.reindex(columns=town_names).fillna(0)              # align to M's column order
@@ -363,6 +348,25 @@ def line_intensity_panel(end_date_str: str, days_back: int) -> dict:
         'static_lons':  static_lons,
         'frames':       frames,
     }
+
+
+def line_intensity_panel(end_date_str: str, days_back: int) -> dict:
+    """Public wrapper — 'Last N days' window with auto resolution.
+    Hourly for ≤14 days, daily otherwise."""
+    d_hi = pd.Timestamp(end_date_str).normalize() + pd.Timedelta(days=1)
+    d_lo = d_hi - pd.Timedelta(days=days_back)
+    resolution = 'hourly' if days_back <= 14 else 'daily'
+    return _line_intensity_panel_impl(d_lo, d_hi, resolution)
+
+
+def line_intensity_panel_window(start_date_str: str, end_date_str: str,
+                                 resolution: str) -> dict:
+    """Public wrapper — explicit [start_date, end_date] window with the
+    user's chosen 'hourly' or 'daily' granularity. Used by the
+    'Custom window animation' mode."""
+    d_lo = pd.Timestamp(start_date_str).normalize()
+    d_hi = pd.Timestamp(end_date_str).normalize() + pd.Timedelta(days=1)
+    return _line_intensity_panel_impl(d_lo, d_hi, resolution)
 
 
 @st.cache_data
@@ -750,17 +754,20 @@ tab_map, tab_town = st.tabs(['Today', 'By town'])
 # TAB 1 — Daily map
 # =============================================================
 with tab_map:
-    # Segmented control reads as a clear mode switch. Falls back to st.radio
-    # on Streamlit versions that don't have st.segmented_control yet.
-    _MODE_LABELS = ['Single day', 'Recent days animation']
+    # Three-way segmented control:
+    #   1. Single day                — pick a historical date, see one map.
+    #   2. Recent days animation     — quick presets (last 3/7/14/30/90 days).
+    #   3. Custom window animation   — pick start, end, and granularity.
+    _MODE_LABELS = ['Single day', 'Recent days animation', 'Custom window animation']
     if hasattr(st, 'segmented_control'):
         _mode = st.segmented_control(
             'View',
             options=_MODE_LABELS,
             default=_MODE_LABELS[0],
             label_visibility='collapsed',
-            help='Single day: pick any historical date. Animation: watch the '
-                 'grid heat up and cool down over a recent window.',
+            help='Single day: pick any historical date. '
+                 'Recent days animation: quick last-N-days presets. '
+                 'Custom window animation: pick exact start/end + granularity.',
         )
     else:
         _mode = st.radio(
@@ -769,24 +776,76 @@ with tab_map:
             horizontal=True,
             label_visibility='collapsed',
         )
-    animation_mode = (_mode == _MODE_LABELS[1])
+    animation_mode = (_mode in (_MODE_LABELS[1], _MODE_LABELS[2]))
+    custom_window_mode = (_mode == _MODE_LABELS[2])
 
     if animation_mode:
-        anim_days = st.selectbox(
-            'Window',
-            options=[3, 7, 14, 30, 90],
-            index=1,
-            format_func=lambda d: f'Last {d} days',
-            help='Resolution auto-selects: hourly for ≤14 days, daily beyond. '
-                 'Longer windows mean more frames; the 90-day view runs at '
-                 'daily granularity to stay smooth.',
-        )
+        if custom_window_mode:
+            # User-controlled window + granularity. Defaults: last 14 days,
+            # hourly — large enough to be interesting, small enough to load fast.
+            cw1, cw2, cw3 = st.columns([1, 1, 1])
+            with cw1:
+                anim_start = st.date_input(
+                    'Start date',
+                    value=pd.Timestamp(date_hi).date() - pd.Timedelta(days=14),
+                    min_value=date_lo, max_value=date_hi, key='anim_start',
+                    help='First date in the animation window.',
+                )
+            with cw2:
+                anim_end = st.date_input(
+                    'End date',
+                    value=pd.Timestamp(date_hi).date(),
+                    min_value=date_lo, max_value=date_hi, key='anim_end',
+                    help='Last date in the animation window (inclusive).',
+                )
+            with cw3:
+                anim_resolution = st.selectbox(
+                    'Granularity',
+                    options=['hourly', 'daily'],
+                    index=0,
+                    key='anim_resolution',
+                    help='Hourly: 24 frames per day. Daily: 1 frame per day. '
+                         'Pick daily for long windows so the animation stays smooth.',
+                )
 
-        with st.spinner('Pre-computing line intensities for every frame…'):
-            panel = line_intensity_panel(str(date_hi), days_back=anim_days)
-        if not panel['frame_labels']:
-            st.error(f'No data in the last {anim_days} days.')
-            st.stop()
+            if anim_start > anim_end:
+                st.error('Start date must be on or before end date.')
+                st.stop()
+
+            # Soft warning when the user picks a heavy combo. 30 days × 24h = 720
+            # frames is borderline; 90 days × 24h = 2160 frames will be slow.
+            n_days_picked = (anim_end - anim_start).days + 1
+            if anim_resolution == 'hourly' and n_days_picked > 30:
+                st.warning(
+                    f'Hourly × {n_days_picked} days = {n_days_picked * 24:,} frames. '
+                    f'This may take a while to render — switch to daily for a smoother experience.'
+                )
+
+            with st.spinner('Pre-computing line intensities for every frame…'):
+                panel = line_intensity_panel_window(
+                    str(anim_start), str(anim_end), anim_resolution,
+                )
+            if not panel['frame_labels']:
+                st.error(f'No data between {anim_start} and {anim_end}.')
+                st.stop()
+            window_label = f'{anim_start.strftime("%d %b %Y")} → {anim_end.strftime("%d %b %Y")}'
+        else:
+            anim_days = st.selectbox(
+                'Window',
+                options=[3, 7, 14, 30, 90],
+                index=1,
+                format_func=lambda d: f'Last {d} days',
+                help='Resolution auto-selects: hourly for ≤14 days, daily beyond. '
+                     'Longer windows mean more frames; the 90-day view runs at '
+                     'daily granularity to stay smooth.',
+            )
+
+            with st.spinner('Pre-computing line intensities for every frame…'):
+                panel = line_intensity_panel(str(date_hi), days_back=anim_days)
+            if not panel['frame_labels']:
+                st.error(f'No data in the last {anim_days} days.')
+                st.stop()
+            window_label = f'Last {anim_days} days'
 
         n_frames = len(panel['frame_labels'])
         st.markdown(
@@ -795,7 +854,7 @@ with tab_map:
             f"margin: 8px 0 18px 0;'>"
             f"<div style='font-size:0.78rem; color:{COLOR_TEXT_MUTED}; "
             f"text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px'>"
-            f"ANIMATION · Last {anim_days} days · {panel['resolution']}</div>"
+            f"ANIMATION · {window_label} · {panel['resolution']}</div>"
             f"<div style='font-size:1.4rem; font-family:'Inter',sans-serif; "
             f"font-weight:400; letter-spacing:-0.025em; line-height:1.2'>"
             f"Watch the 110 kV grid heat up and cool down</div>"
