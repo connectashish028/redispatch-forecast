@@ -232,12 +232,36 @@ def line_to_nearest_towns(threshold_km: float = 10.0) -> dict:
 _BUCKET_EDGES  = [1, 4, 10, 20]                # idle | low | mid | high | critical
 _BUCKET_COLORS = [
     'rgba(134, 239, 172, 0.45)',               # idle — light green = "calm grid"
-    'rgba( 59, 130, 246, 0.55)',               # low (ACTUAL blue, dim)
-    'rgba( 59, 130, 246, 0.90)',               # mid (ACTUAL blue, full)
-    'rgba(255, 127,  14, 0.92)',               # high (warm transition)
-    'rgba(255,  48,  48, 0.95)',               # critical
+    'rgba( 56, 189, 248, 0.85)',               # low — cyan (clearly distinct from mid)
+    'rgba( 59, 130, 246, 0.95)',               # mid — actual blue
+    'rgba(255, 127,  14, 0.95)',               # high — warm transition
+    'rgba(255,  48,  48, 0.95)',               # critical — red
 ]
 _BUCKET_NAMES  = ['no activity', 'low (1-3)', 'mid (4-9)', 'high (10-19)', 'critical (20+)']
+
+
+def _legend_html() -> str:
+    """Inline HTML legend strip used above both the static and animated maps.
+    Five swatches + labels, JetBrains Mono, no Plotly dependency."""
+    swatches = ''.join(
+        f"<span style='display:inline-flex; align-items:center; "
+        f"margin-right:18px; gap:6px; font-family:JetBrains Mono,monospace; "
+        f"font-size:0.78rem; color:{COLOR_TEXT_MUTED};'>"
+        f"<span style='display:inline-block; width:18px; height:3px; "
+        f"background:{c}; border-radius:1px;'></span>{n}</span>"
+        for c, n in zip(_BUCKET_COLORS, _BUCKET_NAMES)
+    )
+    return (
+        f"<div style='padding:8px 12px; margin: 0 0 8px 0; "
+        f"background:{COLOR_SURFACE}; border:1px solid {COLOR_RING}; "
+        f"border-radius:8px; line-height:1.6;'>"
+        f"<span style='font-family:JetBrains Mono,monospace; "
+        f"font-size:0.72rem; letter-spacing:0.08em; "
+        f"color:{COLOR_TEXT_MUTED}; text-transform:uppercase; "
+        f"margin-right:14px;'>Concurrent operations on nearby substations</span>"
+        f"{swatches}"
+        f"</div>"
+    )
 
 # Single line width used by every bucket — the green idle lines and the
 # colored active lines share the same path with identical thickness, so
@@ -402,6 +426,24 @@ def typical_day_volume() -> int:
     wide = load_data()['wide']
     daily = (wide > 0).sum(axis=1).resample('D').sum() / 4   # 15-min slots → hours
     return int(round(float(daily.median())))
+
+
+@st.cache_data(show_spinner=False)
+def _daily_volume_distribution() -> pd.Series:
+    """All historical daily totals (town-hours), used to compute today's
+    percentile rank for the headline. One number per day."""
+    wide = load_data()['wide']
+    return ((wide > 0).sum(axis=1).resample('D').sum() / 4).astype('float32')
+
+
+def day_percentile(grid_hours: int) -> int:
+    """Today's volume as a percentile of the historical daily distribution.
+    Returns 0..100. Used for the headline classifier so users see 'top 15%'
+    instead of an arbitrary 100/300 cutoff."""
+    dist = _daily_volume_distribution()
+    if dist.empty:
+        return 0
+    return int(round(100.0 * float((dist <= grid_hours).mean())))
 
 
 @st.cache_resource(show_spinner=False)
@@ -688,7 +730,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-with st.expander('What is a redispatch event?'):
+with st.expander('What is a redispatch event?', expanded=True):
     st.markdown(
         'When wind or solar farms generate more power than the local '
         'transmission lines can move out of the region, the grid operator '
@@ -696,26 +738,38 @@ with st.expander('What is a redispatch event?'):
         'lines do not overload. Each such instruction is one *redispatch '
         'event*. In Schleswig-Holstein this happens often along the windy '
         'North Sea coast.\n\n'
-        '**This dashboard shows:** for any day, which substations were '
-        'congested and for how many hours. Bigger / redder bubble on the map '
-        '= more hours with redispatch activity that day.'
+        '**This dashboard shows:** for any day, which 110 kV substations '
+        'were congested and for how many hours, what conditions drove that '
+        'day, and how individual towns are trending over the past 90 days.'
     )
 
 # ---------------------- tabs ----------------------
-tab_map, tab_town = st.tabs(['Daily map', 'Town deep dive'])
+tab_map, tab_town = st.tabs(['Today', 'By substation'])
 
 # =============================================================
 # TAB 1 — Daily map
 # =============================================================
 with tab_map:
-    animation_mode = st.checkbox(
-        'Enable animation', value=False,
-        help='Animate the grid heat over a recent window. The map always '
-             'shows the 110 kV topology — green lines = no redispatch, '
-             'colored lines = active redispatch by intensity.',
-    )
-    # The topology overlay is now the map itself — no toggle needed.
-    # Bubbles have been removed entirely; intensity is encoded on the lines.
+    # Segmented control reads as a clear mode switch. Falls back to st.radio
+    # on Streamlit versions that don't have st.segmented_control yet.
+    _MODE_LABELS = ['Single day', 'Recent days animation']
+    if hasattr(st, 'segmented_control'):
+        _mode = st.segmented_control(
+            'View',
+            options=_MODE_LABELS,
+            default=_MODE_LABELS[0],
+            label_visibility='collapsed',
+            help='Single day: pick any historical date. Animation: watch the '
+                 'grid heat up and cool down over a recent window.',
+        )
+    else:
+        _mode = st.radio(
+            'View',
+            options=_MODE_LABELS,
+            horizontal=True,
+            label_visibility='collapsed',
+        )
+    animation_mode = (_mode == _MODE_LABELS[1])
 
     if animation_mode:
         anim_days = st.selectbox(
@@ -773,14 +827,25 @@ with tab_map:
         n_any        = int((df['active_hours'] > 0).sum())
         grid_hours   = int(df['active_hours'].sum())
         busiest      = df.loc[df['active_hours'].idxmax()]
+
+        # Classifier driven by percentile rank, not arbitrary cutoffs. Reads
+        # naturally as 'busier than X% of historical days'.
+        pct_rank = day_percentile(grid_hours)
         if grid_hours == 0:
             weather_word, headline_color = 'quiet', '#2ca02c'
-        elif grid_hours < 100:
+            rank_phrase = 'no redispatch anywhere'
+        elif pct_rank < 25:
+            weather_word, headline_color = 'calm', '#2ca02c'
+            rank_phrase = f'calmer than {100 - pct_rank}% of days in 2024–25'
+        elif pct_rank < 75:
             weather_word, headline_color = 'normal', COLOR_TEXT
-        elif grid_hours < 300:
+            rank_phrase = f'middle of the pack — busier than {pct_rank}% of days'
+        elif pct_rank < 90:
             weather_word, headline_color = 'busy', '#ff7f0e'
+            rank_phrase = f'top {100 - pct_rank}% of days in 2024–25'
         else:
             weather_word, headline_color = 'very busy', '#ff3030'
+            rank_phrase = f'top {max(1, 100 - pct_rank)}% of days in 2024–25'
 
         st.markdown(
             f"<div style='padding:18px 22px; border-radius:14px; "
@@ -788,14 +853,15 @@ with tab_map:
             f"margin: 8px 0 18px 0;'>"
             f"<div style='font-size:0.78rem; color:{COLOR_TEXT_MUTED}; "
             f"text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px'>"
-            f"DAY · {date.strftime('%A %d %B %Y')}</div>"
+            f"DAY · {date.strftime('%a %d %b %Y')}</div>"
             f"<div style='font-size:1.4rem; font-family:Space Grotesk,Inter,sans-serif; "
             f"font-weight:600; letter-spacing:-0.025em; line-height:1.2'>"
             f"<span style='color:{headline_color}'>It was a {weather_word} day</span> "
             f"<span style='color:{COLOR_TEXT_MUTED}'>·</span> "
             f"<span style='color:{COLOR_TEXT}'>{n_any} of 175 substations had redispatch, "
-            f"{grid_hours} town-hours grid-wide</span></div>"
+            f"{grid_hours} hours of redispatch grid-wide</span></div>"
             f"<div style='color:{COLOR_TEXT_MUTED}; margin-top:6px; font-size:0.92rem'>"
+            f"<span style='color:{COLOR_TEXT_MUTED}'>{rank_phrase}.</span> "
             f"Busiest substation: <b style='color:{COLOR_TEXT}'>{busiest['town']}</b> "
             f"with <b style='color:{COLOR_TEXT}'>{int(busiest['active_hours'])} active hours</b>. "
             f"<b style='color:{COLOR_TEXT}'>{n_alerts}</b> substations were congested for "
@@ -806,10 +872,14 @@ with tab_map:
 
     if not animation_mode:
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric(f'Above {threshold}h', f"{n_alerts}")
-        k2.metric('Any redispatch today', f"{n_any}")
+        k1.metric(f'Above {threshold}h', f"{n_alerts}",
+                  help='Substations active for at least 4 hours today.')
+        k2.metric('Any redispatch today', f"{n_any}",
+                  help='Substations with at least one redispatch event today.')
         k3.metric('Most active town', f"{int(busiest['active_hours'])}h", busiest['town'])
-        k4.metric('Total town-hours', f"{grid_hours}")
+        k4.metric('Hours of redispatch (grid-wide)', f"{grid_hours}",
+                  help='Sum of active hours across all 175 substations. '
+                       '1 = one substation in redispatch for one hour.')
 
     # In animation mode the data shape is (ts × town × peak_concurrency); the
     # static map uses (town × active_hours × peak_concurrency) from daily_hours.
@@ -867,12 +937,9 @@ with tab_map:
                      center=dict(lat=54.3, lon=9.7), zoom=7.0),
             height=620,
             margin=dict(l=0, r=0, t=10, b=0),
-            legend=dict(
-                orientation='h', x=0, y=1.04, xanchor='left',
-                bgcolor='rgba(0,0,0,0)',
-                font=dict(family='JetBrains Mono, monospace',
-                          size=10, color=COLOR_TEXT_MUTED),
-            ),
+            # In-map Plotly legend is suppressed — we render an explicit
+            # legend strip above the map via _legend_html() instead.
+            showlegend=False,
             # Two separate updatemenus (rather than one with two buttons) —
             # otherwise Plotly stacks Play and Pause at the same x and they
             # render on top of each other in some viewports.
@@ -913,18 +980,36 @@ with tab_map:
                                  color=COLOR_TEXT, size=15),
                     'offset': 8,
                 },
+                # Slider track styling — explicit colors so the rail and
+                # progress fill don't blend into the map's dark backdrop.
+                'bgcolor':           'rgba(255,255,255,0.12)',
+                'bordercolor':       'rgba(255,255,255,0.30)',
+                'borderwidth':       1,
+                'tickcolor':         'rgba(255,255,255,0.45)',
+                'ticklen':           5,
+                'tickwidth':         1,
+                'font':              dict(family='JetBrains Mono, monospace',
+                                          color=COLOR_TEXT_MUTED, size=10),
+                'minorticklen':      2,
                 # More headroom above the slider track so the currentvalue
                 # text doesn't collide with the map; a touch more below for
                 # the tick labels.
                 'pad': {'t': 60, 'b': 10},
                 'x': 0.12, 'len': 0.85,
                 'transition': {'duration': 0},
+                # Ticks: when there are many frames, only label every Nth so
+                # the x-axis doesn't smush into unreadable mush. Other frames
+                # still exist (slider passes through them); their dates show
+                # in the bigger currentvalue field above the track.
                 'steps': [
-                    {'method': 'animate', 'label': lbl,
+                    {'method': 'animate',
+                     'label': (lbl if len(labels) <= 14
+                               or i % max(1, len(labels) // 10) == 0
+                               else ''),
                      'args': [[lbl], {'frame': {'duration': 0, 'redraw': True},
                                        'mode': 'immediate',
                                        'transition': {'duration': 0}}]}
-                    for lbl in labels
+                    for i, lbl in enumerate(labels)
                 ],
             }],
         )
@@ -968,12 +1053,9 @@ with tab_map:
                      center=dict(lat=54.3, lon=9.7), zoom=7.0),
             height=620,
             margin=dict(l=0, r=0, t=10, b=0),
-            legend=dict(
-                orientation='h', x=0, y=1.04, xanchor='left',
-                bgcolor='rgba(0,0,0,0)',
-                font=dict(family='JetBrains Mono, monospace',
-                          size=10, color=COLOR_TEXT_MUTED),
-            ),
+            # In-map Plotly legend is suppressed — we render an explicit
+            # legend strip above the map via _legend_html() instead.
+            showlegend=False,
         )
 
         # If the day was completely quiet, drop a centred annotation so it
@@ -989,6 +1071,9 @@ with tab_map:
                 borderwidth=1, borderpad=10,
             )
 
+    # Legend goes above the map so first-time users can decode the colors
+    # without hovering anything.
+    st.markdown(_legend_html(), unsafe_allow_html=True)
     st.plotly_chart(fig_map, use_container_width=True)
 
     # ============================================================
@@ -999,6 +1084,17 @@ with tab_map:
     if not animation_mode:
         attribution = load_today_attribution(str(date))
 
+        # Surface card framing — visually anchors the Why? section so users
+        # don't mistake the rich attribution content for a footnote.
+        st.markdown(
+            f"<div style='padding:4px 22px 22px 22px; "
+            f"background:{COLOR_SURFACE}; border:1px solid {COLOR_RING}; "
+            f"border-radius:14px; margin: 18px 0 18px 0;'>"
+            f"<div style='font-size:0.78rem; color:{COLOR_TEXT_MUTED}; "
+            f"text-transform:uppercase; letter-spacing:0.08em; "
+            f"padding-top:14px; margin-bottom:0;'>WHY?</div>",
+            unsafe_allow_html=True,
+        )
         st.markdown('### Why did today look this way?')
 
         if attribution is None:
@@ -1173,8 +1269,8 @@ with tab_map:
                         f"Top 5 individual signals ranked by how much they shifted "
                         f"the model's prediction for {date}. Positive numbers "
                         f"pushed the day toward stress; negative pushed it away. "
-                        f"Computed across {attribution['n_rows']:,} hour-by-town "
-                        f"cells for the day."
+                        f"Averaged across all 175 substations and 24 hours of "
+                        f"the day."
                     )
                     tf = tf.copy()
                     tf['odds_change_pct'] = (np.exp(tf['mean_logodds']) - 1) * 100
@@ -1189,14 +1285,17 @@ with tab_map:
                     )
 
             st.caption(
-                "How this is computed: the dashboard's forecast model looks "
-                "at every substation, every hour, and assigns each grid "
+                "How this is computed: the forecast model looks at every "
+                "substation, every hour of the day, and assigns each grid "
                 "condition (wind, demand, recent activity, etc.) a portion "
                 "of the day's predicted busyness. We group the signals into "
                 "six families and show how much each tilted the day. "
                 "Families overlap a bit (a windy day is usually a low-price "
                 "day too), so the percentages don't add up exactly."
             )
+
+        # Close the Why? surface card
+        st.markdown("</div>", unsafe_allow_html=True)
 
     if not animation_mode:
         st.markdown('### Top 15 most-congested substations today')
@@ -1205,12 +1304,11 @@ with tab_map:
             st.info('No redispatch events anywhere on this date.')
         else:
             top.insert(0, '#', range(1, len(top) + 1))
-            leaderboard = top[['#', 'town', 'active_hours', 'n_events',
+            leaderboard = top[['#', 'town', 'active_hours',
                                'peak_concurrency', 'dominant_reason']].copy()
             leaderboard = leaderboard.rename(columns={
                 'town':             'Town',
                 'active_hours':     'Active hours',
-                'n_events':         'Distinct events',
                 'peak_concurrency': 'Peak concurrent ops',
                 'dominant_reason':  'Dominant reason',
             })
@@ -1250,11 +1348,18 @@ with tab_town:
         default_town = 'Husum' if 'Husum' in all_towns else all_towns[0]
         town = st.selectbox('Town', all_towns, index=all_towns.index(default_town))
     with c2:
+        # Mirror the date the user picked on Tab 1. Streamlit treats the
+        # session_state key as the source of truth once a widget is
+        # instantiated, so we sync explicitly here.
+        if 'deep_date' not in st.session_state:
+            st.session_state['deep_date'] = st.session_state.get(
+                'sel_date', pd.Timestamp(date_hi).date()
+            )
         deep_date = st.date_input(
             'End date',
-            value=st.session_state.get('sel_date', pd.Timestamp(date_hi).date()),
             min_value=date_lo, max_value=date_hi, key='deep_date',
-            help='The history view ends on this date and looks back 90 days.',
+            help='The history view ends on this date and looks back 90 days. '
+                 'Defaults to the date selected on the Today tab.',
         )
 
     hist = town_history(town, str(deep_date), days_back=90)
@@ -1366,8 +1471,8 @@ with tab_town:
                 'first_seen':         'First seen',
                 'last_seen':          'Last seen',
             })
-            disp['First seen'] = pd.to_datetime(disp['First seen']).dt.strftime('%Y-%m-%d')
-            disp['Last seen']  = pd.to_datetime(disp['Last seen']).dt.strftime('%Y-%m-%d')
+            disp['First seen'] = pd.to_datetime(disp['First seen']).dt.strftime('%a %d %b %Y')
+            disp['Last seen']  = pd.to_datetime(disp['Last seen']).dt.strftime('%a %d %b %Y')
             disp = disp[['#', 'Transformer', 'Netzengpass ops',
                          'All operations', 'First seen', 'Last seen']]
             st.dataframe(
@@ -1388,14 +1493,19 @@ with st.expander('About this dashboard'):
     st.markdown(
         '* **Data source.** Operational redispatch records from '
         'Schleswig-Holstein Netz (SHN), filtered to grid-bottleneck reasons '
-        '(*Netzengpass* / *Netzengpass I*).\n'
-        '* **Severity metric.** Total active hours per (town, day) - between '
+        '(*Netzengpass* / *Netzengpass I*). Refreshed daily.\n'
+        '* **Severity metric.** Total active hours per (town, day) — between '
         '0 and 24. A town active 14 hours had at least one redispatch event '
         'overlapping each of those 14 hours.\n'
         '* **Window.** 1 January 2024 to the latest available data.\n'
+        '* **Topology.** 110 kV substations and lines from OpenStreetMap '
+        '(Overpass), refreshed when the grid changes. Lines are coloured by '
+        'the highest concurrent-op count among nearby substations.\n'
+        '* **"Why?" attribution.** A LightGBM 24-hour-horizon forecast '
+        '(198 features, calibrated, ROC-AUC ≈ 0.83) decomposes each day\'s '
+        'predicted busyness into six driver families using TreeSHAP. The '
+        'narrative beneath the map summarises which families pushed the '
+        'system toward or away from stress.\n'
         '* **Geocoding.** Town centroids from OpenStreetMap (Nominatim) with a '
-        'small set of manual overrides for unnamed substations.\n'
-        '* **What is not in v1.** Day-ahead probability forecasts. The '
-        'underlying ML pipeline is WIP and will be layered onto '
-        'this dashboard in a future release.'
+        'small set of manual overrides for unnamed substations.'
     )
