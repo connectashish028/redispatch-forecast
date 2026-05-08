@@ -423,16 +423,30 @@ def _calibrator_y24h():
 
 
 @st.cache_data(show_spinner=False)
-def _features_window() -> tuple[str, str] | None:
-    """Min/max date in features.parquet, used to pick the right fallback hint."""
+def _attribution_window() -> tuple[str, str] | None:
+    """Min/max date for which the dashboard has driver attribution.
+
+    Resolution order — picks whichever is more authoritative for what the
+    UI can actually render:
+      1. Daily summary parquet (always shipped in git).
+      2. features.parquet (local dev / cron runner only).
+    """
+    summary_path = PRED_DIR / 'contributions_daily_summary.parquet'
+    if summary_path.exists():
+        try:
+            df = pd.read_parquet(summary_path, columns=['date'])
+            if not df.empty:
+                return (str(df['date'].min()), str(df['date'].max()))
+        except Exception:
+            pass
     fpath = ROOT / 'data' / 'processed' / 'features.parquet'
-    if not fpath.exists():
-        return None
-    try:
-        ts = pd.read_parquet(fpath, columns=['ts'])['ts']
-        return (str(ts.min().date()), str(ts.max().date()))
-    except Exception:
-        return None
+    if fpath.exists():
+        try:
+            ts = pd.read_parquet(fpath, columns=['ts'])['ts']
+            return (str(ts.min().date()), str(ts.max().date()))
+        except Exception:
+            pass
+    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -859,21 +873,33 @@ with tab_map:
                 font=dict(family='JetBrains Mono, monospace',
                           size=10, color=COLOR_TEXT_MUTED),
             ),
-            updatemenus=[{
-                'type': 'buttons',
-                'direction': 'left',
-                'showactive': False,
-                'x': 0.01, 'y': -0.05, 'xanchor': 'left', 'yanchor': 'top',
-                'pad': {'t': 0, 'r': 6},
-                'buttons': [
-                    {'label': '▶  Play', 'method': 'animate',
-                     'args': [None, {'frame': {'duration': 350, 'redraw': True},
-                                      'fromcurrent': True, 'transition': {'duration': 0}}]},
-                    {'label': '❚❚  Pause', 'method': 'animate',
-                     'args': [[None], {'frame': {'duration': 0, 'redraw': False},
-                                        'mode': 'immediate', 'transition': {'duration': 0}}]},
-                ],
-            }],
+            # Two separate updatemenus (rather than one with two buttons) —
+            # otherwise Plotly stacks Play and Pause at the same x and they
+            # render on top of each other in some viewports.
+            updatemenus=[
+                {
+                    'type': 'buttons', 'showactive': False,
+                    'x': 0.01, 'y': -0.05, 'xanchor': 'left', 'yanchor': 'top',
+                    'pad': {'t': 0, 'r': 6},
+                    'buttons': [
+                        {'label': '▶  Play', 'method': 'animate',
+                         'args': [None, {'frame': {'duration': 350, 'redraw': True},
+                                         'fromcurrent': True,
+                                         'transition': {'duration': 0}}]},
+                    ],
+                },
+                {
+                    'type': 'buttons', 'showactive': False,
+                    'x': 0.07, 'y': -0.05, 'xanchor': 'left', 'yanchor': 'top',
+                    'pad': {'t': 0, 'r': 6},
+                    'buttons': [
+                        {'label': '❚❚  Pause', 'method': 'animate',
+                         'args': [[None], {'frame': {'duration': 0, 'redraw': False},
+                                           'mode': 'immediate',
+                                           'transition': {'duration': 0}}]},
+                    ],
+                },
+            ],
             sliders=[{
                 'active': 0,
                 'currentvalue': {
@@ -967,32 +993,38 @@ with tab_map:
         st.markdown('### Why did today look this way?')
 
         if attribution is None:
-            window = _features_window()
-            in_window = (
-                window is not None
-                and window[0] <= str(date) <= window[1]
-            )
-            if in_window:
+            window = _attribution_window()
+            if window is None:
                 st.info(
-                    f"Driver attribution for **{date}** isn't cached yet, but "
-                    f"the date is inside the model's feature window "
-                    f"({window[0]} → {window[1]}). Generate it with "
-                    f"`python src/v2/score_today.py --date {date}` and reload.",
+                    f"Driver attribution unavailable for **{date}** — the "
+                    f"daily attribution summary isn't on disk. The next "
+                    f"scheduled data refresh will publish it.",
                     icon='ℹ️',
                 )
             else:
-                w_lo, w_hi = (window if window is not None else ('?', '?'))
-                st.info(
-                    f"Driver attribution unavailable for **{date}** — this "
-                    f"date is outside the model's feature window "
-                    f"({w_lo} → {w_hi}). To extend coverage to {date}, run "
-                    f"the full refresh: "
-                    f"`python src/fetcher.py` → "
-                    f"`python src/build_timeseries.py` → "
-                    f"`python src/v2/build_features.py` → "
-                    f"`python src/v2/score_today.py --date {date}`.",
-                    icon='ℹ️',
-                )
+                w_lo, w_hi = window
+                if str(date) > w_hi:
+                    st.info(
+                        f"Driver attribution for **{date}** isn't published yet "
+                        f"— the daily refresh has caught up to **{w_hi}** so far. "
+                        f"It runs once a day around 04:30 UTC; today's "
+                        f"attribution typically appears the morning after.",
+                        icon='ℹ️',
+                    )
+                elif str(date) < w_lo:
+                    st.info(
+                        f"Driver attribution unavailable for **{date}** — the "
+                        f"published summary covers **{w_lo} → {w_hi}**. "
+                        f"Pick a date inside that window to see drivers.",
+                        icon='ℹ️',
+                    )
+                else:
+                    st.info(
+                        f"Driver attribution for **{date}** is missing from "
+                        f"the summary file (covers **{w_lo} → {w_hi}**). The "
+                        f"next daily refresh should fill the gap.",
+                        icon='ℹ️',
+                    )
         else:
             typical = max(typical_day_volume(), 1)
             ratio   = grid_hours / typical
