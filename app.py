@@ -1141,18 +1141,15 @@ with tab_map:
     # Retrospective attribution via TreeSHAP on the production LightGBM.
     # Static-mode only — in animation the per-frame story IS the explanation.
     if not animation_mode:
-        attribution = load_today_attribution(str(date))
+      attribution = load_today_attribution(str(date))
 
-        # Surface card framing — visually anchors the Why? section so users
-        # don't mistake the rich attribution content for a footnote. We only
-        # use the wrapping div + an h3 inside (no extra eyebrow label, which
-        # was redundant with the heading).
-        st.markdown(
-            f"<div style='padding:18px 22px; "
-            f"background:{COLOR_SURFACE}; border:1px solid {COLOR_RING}; "
-            f"border-radius:14px; margin: 18px 0 18px 0;'>",
-            unsafe_allow_html=True,
-        )
+      # Surface card framing — visually anchors the Why? section so users
+      # don't mistake the rich attribution content for a footnote. Using
+      # st.container(border=True) is Streamlit-native: it produces one
+      # bordered DOM element that wraps everything inside the `with`
+      # block. Raw HTML wrappers don't work here because each st.X call
+      # is sandboxed in its own element-container.
+      with st.container(border=True):
         st.markdown('### Why did today look this way?')
 
         if attribution is None:
@@ -1351,9 +1348,6 @@ with tab_map:
                 "Families overlap a bit (a windy day is usually a low-price "
                 "day too), so the percentages don't add up exactly."
             )
-
-        # Close the Why? surface card
-        st.markdown("</div>", unsafe_allow_html=True)
 
     if not animation_mode:
         st.markdown('### Top 15 most-congested substations today')
