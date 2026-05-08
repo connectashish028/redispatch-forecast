@@ -254,11 +254,19 @@ input, select, textarea, .stDateInput input,
     text-transform: uppercase !important;
     color: {TEXT_70} !important;
 }}
-/* Streamlit ≥ 1.30 ships an SVG caret inside <summary> whose <title>
-   ("arrow") leaks as readable text on some browsers — strip it and let
-   our own caret style handle the disclosure indicator. */
-[data-testid="stExpander"] summary svg title {{ display: none !important; }}
-[data-testid="stExpander"] summary svg {{ flex-shrink: 0; }}
+/* Streamlit's expander caret is a Material Symbols ligature ("arrow_drop_down")
+   rendered by an icon font. When the font fails to load (CSP, blocked CDN,
+   strict mode), the ligature text leaks through as readable letters next to
+   the label — that's the 'arr' some users see. Hide every non-text child of
+   summary (the icon container and any svg) and let the disclosure state read
+   purely from <details open>. */
+[data-testid="stExpander"] summary > div:not([data-testid="stMarkdownContainer"]),
+[data-testid="stExpander"] summary span.material-icons,
+[data-testid="stExpander"] summary span[class*="material" i],
+[data-testid="stExpander"] summary [data-testid*="Icon" i],
+[data-testid="stExpander"] summary svg {{
+    display: none !important;
+}}
 
 /* -------- dataframes -------- */
 [data-testid="stDataFrame"] {{

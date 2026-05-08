@@ -744,7 +744,7 @@ with st.expander('What is a redispatch event?', expanded=True):
     )
 
 # ---------------------- tabs ----------------------
-tab_map, tab_town = st.tabs(['Today', 'By substation'])
+tab_map, tab_town = st.tabs(['Today', 'By town'])
 
 # =============================================================
 # TAB 1 — Daily map
@@ -1085,14 +1085,13 @@ with tab_map:
         attribution = load_today_attribution(str(date))
 
         # Surface card framing — visually anchors the Why? section so users
-        # don't mistake the rich attribution content for a footnote.
+        # don't mistake the rich attribution content for a footnote. We only
+        # use the wrapping div + an h3 inside (no extra eyebrow label, which
+        # was redundant with the heading).
         st.markdown(
-            f"<div style='padding:4px 22px 22px 22px; "
+            f"<div style='padding:18px 22px; "
             f"background:{COLOR_SURFACE}; border:1px solid {COLOR_RING}; "
-            f"border-radius:14px; margin: 18px 0 18px 0;'>"
-            f"<div style='font-size:0.78rem; color:{COLOR_TEXT_MUTED}; "
-            f"text-transform:uppercase; letter-spacing:0.08em; "
-            f"padding-top:14px; margin-bottom:0;'>WHY?</div>",
+            f"border-radius:14px; margin: 18px 0 18px 0;'>",
             unsafe_allow_html=True,
         )
         st.markdown('### Why did today look this way?')
@@ -1415,14 +1414,19 @@ with tab_town:
 
         # ----- 7-day hour-of-day heatmap -----
         heat = town_hour_heatmap(town, str(deep_date), days_back=7)
-        st.markdown(f'### {town} - last 7 days, hour-by-hour')
+        st.markdown(f'### {town} — last 7 days, hour-by-hour')
         st.caption(
             'Each cell = how many of the four 15-min slots in that hour were '
             'active. 4 = the entire hour was congested; 0 = nothing happened.'
         )
 
-        if heat.empty:
-            st.info('No activity in the last 7 days.')
+        if heat.empty or heat.values.sum() == 0:
+            st.info(
+                f'**{town}** had no redispatch in the 7 days ending '
+                f'{pd.Timestamp(deep_date).strftime("%a %d %b %Y")}. '
+                f'Pick an earlier end date to see this town\'s busy weeks — '
+                f'the 90-day chart above shows when activity peaked.'
+            )
         else:
             date_labels = [pd.Timestamp(d).strftime('%a %d %b') for d in heat.index]
             fig_heat = go.Figure(go.Heatmap(
