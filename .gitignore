@@ -33,10 +33,16 @@ data/raw/shn_operations_last_2y/*
 !data/raw/shn_operations_last_2y/chunk_*.parquet
 
 # Re-include the small processed files the dashboard needs to start cold.
+# SMARD/weather cache is whitelisted because fetcher.py is API-bound: a
+# from-scratch pull of the 2024+ window can take ~7 minutes on a CI runner,
+# while incremental pulls against a committed cache take seconds.
 !data/external/towns_geo.parquet
 !data/external/shn_grid.geojson
+!data/external/smard_weather_2024_to_mar2026.parquet
 !data/processed/ts_15min_wide.parquet
 !data/processed/ts_15min_long.parquet
+# features.parquet is intentionally NOT whitelisted — it's regenerable from
+# the above inputs in ~30s, and at 3.6 MB / day the diff churn isn't worth it.
 
 # Trained models. The boosters + calibrators are committed so the daily
 # refresh workflow on GitHub Actions can run inference without a separate

@@ -43,7 +43,12 @@ jobs:
           python -m pip install --upgrade pip
           # Adds lightgbm + scikit-learn + joblib for the scoring step;
           # keeps install slim (no streamlit / plotly — those are dashboard-only).
-          pip install pandas numpy pyarrow requests lightgbm scikit-learn joblib
+          # `holidays` is required by build_features.py for is_de_holiday;
+          # missing it silently degrades predictions (the feature falls back
+          # to 0 for every row). sklearn pinned to match training-time version
+          # so isotonic calibrators unpickle without warnings.
+          pip install pandas numpy pyarrow requests lightgbm \
+                      "scikit-learn>=1.6,<1.7" joblib holidays
 
       - name: Fetch new SHN ops
         run: python src/fetch_shn_ops.py --max-chunks 25
@@ -86,6 +91,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add data/raw/shn_operations_last_2y/chunk_*.parquet \
+                  data/external/smard_weather_2024_to_mar2026.parquet \
                   data/processed/ts_15min_wide.parquet \
                   data/processed/ts_15min_long.parquet \
                   data/predictions/contributions_daily_summary.parquet \
@@ -93,8 +99,23 @@ jobs:
 
           if git diff --cached --quiet; then
             echo "No data changes — nothing to commit."
-          else
-            git commit -m "Daily refresh $(date -u +%Y-%m-%d)"
-            git push
-            echo "Pushed daily refresh."
+            exit 0
           fi
+
+          git commit -m "Daily refresh $(date -u +%Y-%m-%d)"
+
+          # Rebase onto any commits that landed on main while the runner was
+          # building features / scoring (typical when humans push during the
+          # ~5-15 min window). Retry the push a couple of times in case of
+          # genuine concurrent activity.
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git rebase origin/main || { echo "rebase failed on attempt $attempt"; git rebase --abort; exit 1; }
+            if git push; then
+              echo "Pushed daily refresh on attempt $attempt."
+              exit 0
+            fi
+            echo "Push rejected on attempt $attempt; retrying after rebase."
+          done
+          echo "All push attempts failed."
+          exit 1

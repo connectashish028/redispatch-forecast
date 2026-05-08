@@ -18,8 +18,11 @@ ipykernel
 # Testing
 pytest>=7.0
 
-# v2 prediction stack (optional; only needed to run anything under src/v2/)
+# v2 prediction stack (optional; only needed to run anything under src/v2/).
+# scikit-learn pinned to a 1.6.x range so the isotonic calibrators pickled
+# at training time (sklearn 1.6.1) unpickle without InconsistentVersionWarning.
+# Bumping this requires re-running src/v2/train.py to refit calibrators.
 lightgbm>=4.0
-scikit-learn>=1.3
+scikit-learn>=1.6,<1.7
 joblib>=1.3
 holidays>=0.40
