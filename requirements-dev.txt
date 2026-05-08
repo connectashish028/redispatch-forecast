@@ -16,7 +16,7 @@ imageio>=2.30              # PNG -> GIF stitching
 # Notebook
 jupyter
 ipykernel
-matplotlib>=3.7
+# (matplotlib is now in runtime requirements.txt for pandas Styler heat coloring)
 
 # Tests
 pytest>=7.0

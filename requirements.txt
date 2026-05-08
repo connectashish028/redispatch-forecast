@@ -10,6 +10,8 @@ pyarrow>=10                # parquet reads
 # Dashboard runtime
 plotly>=5.18
 streamlit>=1.30
+matplotlib>=3.7            # required transitively by pandas Styler.background_gradient
+                           # (used in the Top 15 + substation tables for heat-coloring)
 
 # Calibrator unpickling for the "Why?" panel. The dashboard has a try/except
 # fallback to uncalibrated sigmoid if these are absent, but predictions
