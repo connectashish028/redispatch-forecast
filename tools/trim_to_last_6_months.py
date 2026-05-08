@@ -75,11 +75,22 @@ def trim_summary(cutoff: pd.Timestamp) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument('--days', type=int, default=180)
+    ap.add_argument('--months', type=int, default=6,
+                    help='Cutoff = first of this month - N months. '
+                         'Aligns with build_timeseries WINDOW_MONTHS.')
+    ap.add_argument('--days', type=int, default=None,
+                    help='Override the months-rounded cutoff with an exact '
+                         'today - DAYS rolling cutoff.')
     args = ap.parse_args()
 
-    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=args.days)
-    print(f'[trim] cutoff = {cutoff.date()} (today - {args.days} days)')
+    if args.days is not None:
+        cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=args.days)
+        print(f'[trim] cutoff = {cutoff.date()} (today - {args.days} days)')
+    else:
+        cutoff = (pd.Timestamp.today().normalize().replace(day=1)
+                  - pd.DateOffset(months=args.months))
+        print(f'[trim] cutoff = {cutoff.date()} '
+              f'(first of month - {args.months} months)')
     trim_chunks(cutoff)
     trim_summary(cutoff)
 

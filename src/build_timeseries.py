@@ -32,12 +32,14 @@ OUT_DIR       = ROOT / 'data' / 'processed'
 OUT_WIDE      = OUT_DIR / 'ts_15min_wide.parquet'
 OUT_LONG      = OUT_DIR / 'ts_15min_long.parquet'
 
-# START_CUTOFF auto-derives from `today - WINDOW_DAYS` so the built
-# timeseries grid stays aligned with what we actually keep in the repo.
-# To pin a fixed evaluation window, hard-code a pd.Timestamp here.
-WINDOW_DAYS   = 180
-START_CUTOFF  = (pd.Timestamp.today().normalize()
-                 - pd.Timedelta(days=WINDOW_DAYS))
+# START_CUTOFF auto-derives from "first of the month, WINDOW_MONTHS ago"
+# so the dashboard's date picker always exposes the full first day of the
+# earliest month in scope (e.g. Nov 1 today, Dec 1 in a month, etc.) rather
+# than a ragged today-180-days line. To pin a fixed evaluation window,
+# hard-code a pd.Timestamp here.
+WINDOW_MONTHS = 6
+START_CUTOFF  = (pd.Timestamp.today().normalize().replace(day=1)
+                 - pd.DateOffset(months=WINDOW_MONTHS))
 # END_CUTOFF is auto-detected in load_and_clean(): one day past the latest op
 # we have on disk, so build_timeseries always covers everything fetched so far
 # without manual edits.
