@@ -34,24 +34,40 @@ data/raw/shn_operations_last_2y/*
 
 # Re-include the small processed files the dashboard needs to start cold.
 !data/external/towns_geo.parquet
+!data/external/shn_grid.geojson
 !data/processed/ts_15min_wide.parquet
 !data/processed/ts_15min_long.parquet
 
-# Trained models can be regenerated from src/train.py
-models/
+# Trained models. The boosters + calibrators are committed so the daily
+# refresh workflow on GitHub Actions can run inference without a separate
+# training step. Combined size ~280 KB — small enough.
+models/*
+!models/feature_importance_y_*.csv
+!models/feature_cols.json
+!models/metrics.json
+!models/model_y_*.txt
+!models/calibrator_y_*.joblib
 
-# Daily prediction outputs (regenerable from src/score_today.py)
-data/predictions/
+# Daily prediction outputs (regenerable from src/v2/score_today.py).
+# Per-day parquets are large (~600 KB × 800+ days = ~500 MB); we keep them
+# local + in CI runners only. The dashboard's "Why?" panel reads the rolled-up
+# daily summary, which we DO commit (built by src/build_daily_summary.py).
+data/predictions/*
+!data/predictions/contributions_daily_summary.parquet
 app_test.py
 
 # Loose artifacts dropped at the project root by older runs
 /ts_15min*.parquet
 /redispatch_map.html
 /redispatch_animation.html
+/backfill.log
+
+# Local design doc — not part of the public repo
+/THEME.md
 
 # Jupyter outputs (keep notebooks lean)
 *-checkpoint.ipynb
 
-# v2 work-in-progress (kept local only)
-src/v2/
+# v2 inference + training pipeline is now production code (used by the daily
+# refresh workflow). Notebooks stay local — too noisy for git.
 notebooks/v2/

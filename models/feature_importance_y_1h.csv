@@ -1,0 +1,199 @@
+feature,gain,split
+active_7d_lag24,6942956.169921875,11
+wind_onshore,6834518.934082031,21
+wx_wind_gusts_10m,1948309.1552734375,22
+active_24h_lag24,1856503.603515625,16
+lat,1768168.4208984375,20
+total_load,1501995.994140625,27
+wind_offshore,1283776.5942382812,35
+wx_wind_speed_100m,1113330.3720703125,6
+wx_wind_direction_100m,991628.6166992188,31
+lon,743887.3803710938,29
+dow,635891.3486328125,24
+wx_temperature_2m,505127.9638671875,25
+solar,387222.4013671875,14
+month,313273.873046875,17
+wx_wind_speed_10m,226190.6240234375,9
+residual_load,213468.001953125,10
+hour,203474.69775390625,10
+wx_cloud_cover,154985.6015625,7
+day_ahead,124588.83203125,8
+town_St. Peter,88680.69921875,2
+town_Heide,70460.2900390625,2
+town_Str?bbel,61885.1015625,3
+town_110kV Reußenköge (Privat),60655.2001953125,3
+is_de_holiday,51240.2998046875,2
+town_Brachenfeld,46427.798828125,2
+is_weekend,41184.0,1
+wx_precipitation,39573.23095703125,2
+town_Ahrenviöl,38692.5,1
+town_Lübke Koog Ost,36244.0,2
+town_Uelvesbüll,27812.5,1
+town_Niebüll,26103.599609375,1
+wx_shortwave_radiation,23672.2001953125,2
+town_Ostermoor West,20941.80078125,1
+town_Lütjenbrode,18979.30029296875,2
+town_110kV Dörpum 1 (Privat),17921.30078125,1
+town_Linden,8932.6904296875,1
+town_Quickborn,7446.97998046875,1
+town_Nortorf Steinburg,0.0,0
+town_Nortorf,0.0,0
+town_Niendorf,0.0,0
+town_Itzehoe Süd,0.0,0
+town_Oldenborstel,0.0,0
+town_Neumünster West,0.0,0
+town_Neumünster Süd,0.0,0
+town_Oldersbek,0.0,0
+town_Neumünster Ost,0.0,0
+town_Neumünster Nord,0.0,0
+town_Neumünster Mitte,0.0,0
+town_Pinneberg Mitte,0.0,0
+town_Mölln West,0.0,0
+town_Meldorf,0.0,0
+town_Klixbüll,0.0,0
+town_Marne West,0.0,0
+town_Krogaspe,0.0,0
+town_Kropp,0.0,0
+town_Krüzen West,0.0,0
+town_Katenstedt,0.0,0
+town_Quickborn D.,0.0,0
+town_Langenhorn,0.0,0
+town_Kaltenkirchen Süd,0.0,0
+town_Lauenburg,0.0,0
+town_Lensahn,0.0,0
+town_Lindewitt,0.0,0
+town_Lindewitt Nord,0.0,0
+town_Löwenstedt,0.0,0
+town_Kaltenkirchen Nord,0.0,0
+town_Lübke Koog West,0.0,0
+town_Jübek Ost,0.0,0
+town_Lütjenburg,0.0,0
+town_Jevenstedt,0.0,0
+town_Schwarzenbek,0.0,0
+town_Quickborn Ost,0.0,0
+town_Süderbrarup,0.0,0
+town_Tarp,0.0,0
+town_Toftum,0.0,0
+town_Trenter Berg,0.0,0
+town_Tönning,0.0,0
+town_Uetersen W,0.0,0
+town_Uetersen West,0.0,0
+town_Vollstedt,0.0,0
+town_W,0.0,0
+town_Wahlstedt,0.0,0
+town_Wahlstedt Neu,0.0,0
+town_Wattenbek,0.0,0
+town_Wedel Nord,0.0,0
+town_Weding,0.0,0
+town_Weesby,0.0,0
+town_Weißenhaus,0.0,0
+town_Willinghusen,0.0,0
+town_Wöhrden,0.0,0
+town_Süderdeich,0.0,0
+town_Strübbel,0.0,0
+town_Quickborn/Dithmarschen,0.0,0
+town_Struxdorf,0.0,0
+town_Reinsbüttel,0.0,0
+town_Rendsburg Mitte,0.0,0
+town_Rendsburg Nord,0.0,0
+town_Rogerfelde,0.0,0
+town_Schacht,0.0,0
+town_Scharbeutz,0.0,0
+town_Schenefeld HH,0.0,0
+town_Schobüll,0.0,0
+town_Schuby,0.0,0
+town_Schuby West,0.0,0
+town_Itzehoe Mitte,0.0,0
+town_Schwensby,0.0,0
+town_Sieverstedt Süd,0.0,0
+town_Sillerup,0.0,0
+town_Soholm,0.0,0
+town_Steinburg,0.0,0
+town_Stolpe,0.0,0
+town_Itzehoe Nord,0.0,0
+town_Heede,0.0,0
+town_Höhndorf,0.0,0
+town_Bad Bramstedt,0.0,0
+town_110kV Sieverstedt (Privat),0.0,0
+town_110kV Südermarsch (privat),0.0,0
+town_110kV Weding,0.0,0
+town_110kV Weesby (Privat),0.0,0
+town_110kV Weseby (Privat),0.0,0
+town_Ahrensburg Nord,0.0,0
+town_Arkebek,0.0,0
+town_BOSA,0.0,0
+town_Bad Bramstedt Alt,0.0,0
+town_Braak,0.0,0
+town_Bad Segeberg,0.0,0
+town_Bahrenkrug,0.0,0
+town_Bargteheide,0.0,0
+town_Barlt,0.0,0
+town_Bisdorf,0.0,0
+town_Bokhorst,0.0,0
+town_Bollingstedt Nord,0.0,0
+town_Bollingstedt Süd,0.0,0
+town_110kV Pölitz (privat),0.0,0
+town_110kV Ostermoor-Ost (Privat),0.0,0
+town_110kV Oldenswort (Privat),0.0,0
+town_110kV Krüzen (Privat),0.0,0
+town_110kV Alt Bennebek (Privat),0.0,0
+town_110kV Bad Oldesloe (Privat),0.0,0
+town_110kV Barderup (Privat),0.0,0
+town_110kV Breklum (Privat),0.0,0
+town_110kV Dörpum 2 (Privat),0.0,0
+town_110kV Flensburg I,0.0,0
+town_110kV Gasthafen Niebüll GmbH (Privat),0.0,0
+town_110kV Geschendorf (Privat),0.0,0
+town_110kV Grevenkop (Privat),0.0,0
+town_110kV Großenwiehe (Privat),0.0,0
+town_110kV Haby (Privat),0.0,0
+town_110kV Heiligenhafen-Ost (Privat),0.0,0
+town_110kV Hemme-Ost (Privat),0.0,0
+town_110kV Hobstin (Privat),0.0,0
+town_110kV Kamp (Privat),0.0,0
+town_110kV Kastorf (Privat),0.0,0
+town_110kV Klixbuell (Privat),0.0,0
+town_Bornhöved,0.0,0
+town_Bramstedt,0.0,0
+town_Husum Nord,0.0,0
+town_Heide West,0.0,0
+town_Gravelund,0.0,0
+town_Großwaabs,0.0,0
+town_Göhl,0.0,0
+town_Göhl Wind,0.0,0
+town_Hademarschen,0.0,0
+town_Halstenbek,0.0,0
+town_Hamburg Nord,0.0,0
+town_Handewitt,0.0,0
+town_Heiligenhafen,0.0,0
+town_Bramstedt Süd,0.0,0
+town_Hemme Ost,0.0,0
+town_Hemme West,0.0,0
+town_Hohenwestedt,0.0,0
+town_Hohenwestedt alt,0.0,0
+town_Holm,0.0,0
+town_Horstedt,0.0,0
+town_Husum,0.0,0
+town_Husum Adlerhorst,0.0,0
+town_Goosefeld Neu,0.0,0
+town_Goosefeld,0.0,0
+town_Glückstadt,0.0,0
+town_Glinde,0.0,0
+town_Breklum,0.0,0
+town_Breklum Ost,0.0,0
+town_Brokstedt,0.0,0
+town_Cismar West,0.0,0
+town_Dieksanderkoog,0.0,0
+town_Dingen,0.0,0
+town_Eckernförde,0.0,0
+town_Ellenberg,0.0,0
+town_Elmshorn Mitte,0.0,0
+town_Elmshorn Ost,0.0,0
+town_Emmelsbüll Ost,0.0,0
+town_Eutin Süd,0.0,0
+town_Felde,0.0,0
+town_Friedrichstadt,0.0,0
+town_Geesthacht Ost,0.0,0
+town_Geesthacht West,0.0,0
+town_Gettorf,0.0,0
+town_Wöhrden Ost,0.0,0

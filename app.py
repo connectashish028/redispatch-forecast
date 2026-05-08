@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 from theme import (inject_css, register_plotly_template,        # noqa: E402
                    COLOR_BG, COLOR_SURFACE, COLOR_TEXT,
                    COLOR_TEXT_MUTED, COLOR_ACCENT,
-                   COLOR_RING, HEAT_SCALE, HEAT_SCALE_MAP)
+                   COLOR_RING, HEAT_SCALE)
 
 st.set_page_config(
     page_title='Redispatch Visualization - SHN',
@@ -115,23 +115,492 @@ def daily_hours(date_str: str) -> pd.DataFrame:
     return out
 
 
+@st.cache_resource
+def load_topology() -> dict:
+    """Read data/external/shn_grid.geojson once and pre-process it for
+    plotting. Returns lat/lon arrays for substations and (line, separator)
+    sequences ready to drop into a single go.Scattermap trace.
+
+    Returns an empty structure if the GeoJSON file is missing — the dashboard
+    should fall back to no-topology mode rather than fail.
+    """
+    import json
+    path = ROOT / 'data' / 'external' / 'shn_grid.geojson'
+    out = {'lines_lat': [], 'lines_lon': [],
+           'subs_lat':  [], 'subs_lon':  [], 'subs_text': [],
+           'n_lines': 0, 'n_subs': 0}
+    if not path.exists():
+        return out
+
+    gj = json.loads(path.read_text(encoding='utf-8'))
+    n_lines = 0
+    for f in gj.get('features', []):
+        kind = f.get('properties', {}).get('kind')
+        if kind == 'line':
+            coords = f.get('geometry', {}).get('coordinates') or []
+            if len(coords) < 2:
+                continue
+            for lon, lat in coords:
+                out['lines_lat'].append(lat)
+                out['lines_lon'].append(lon)
+            # `None` value breaks the line, so all 2,898 disjoint segments
+            # render in a single trace without becoming one polyline.
+            out['lines_lat'].append(None)
+            out['lines_lon'].append(None)
+            n_lines += 1
+        elif kind == 'substation':
+            coords = f.get('geometry', {}).get('coordinates') or []
+            if len(coords) != 2:
+                continue
+            lon, lat = coords
+            props = f.get('properties', {})
+            name = props.get('name') or f"OSM #{props.get('osm_id', '')}"
+            voltage = props.get('voltage', '') or '—'
+            operator = props.get('operator', '') or '(operator unknown)'
+            out['subs_lat'].append(lat)
+            out['subs_lon'].append(lon)
+            out['subs_text'].append(
+                f"<b>{name}</b><br>{operator}<br>voltage: {voltage} V"
+            )
+    out['n_lines'] = n_lines
+    out['n_subs'] = len(out['subs_lat'])
+    return out
+
+
+@st.cache_resource(show_spinner='Indexing line endpoints to nearest towns…')
+def line_to_nearest_towns(threshold_km: float = 10.0) -> dict:
+    """For every 110 kV line in shn_grid.geojson, find the towns whose centroid
+    sits within `threshold_km` of either endpoint.
+
+    Returns:
+        {
+            'line_coords':   list of full line-coord arrays (lon-lat order),
+            'town_names':    list of town names in column order,
+            'M':             bool ndarray of shape (n_lines, n_towns),
+                             True where the town is near at least one endpoint
+                             of the line. Used by `line_intensity_panel` for
+                             vectorised per-frame intensity computation.
+        }
+    """
+    import json
+    topo = load_topology()
+    if topo['n_lines'] == 0:
+        return {'line_coords': [], 'town_names': [],
+                'M': np.zeros((0, 0), dtype=bool)}
+
+    geo = load_data()['geo']
+    geo_rad = np.radians(geo[['lat', 'lon']].values)               # (n_towns, 2)
+    town_names = geo['town'].astype(str).tolist()
+
+    path = ROOT / 'data' / 'external' / 'shn_grid.geojson'
+    gj = json.loads(path.read_text(encoding='utf-8'))
+
+    line_coords: list[list] = []
+    endpoints: list[list[float]] = []          # 2 rows per line (a then b)
+    for f in gj['features']:
+        if f['properties'].get('kind') != 'line':
+            continue
+        coords = f['geometry']['coordinates']
+        if len(coords) < 2:
+            continue
+        line_coords.append(coords)
+        endpoints.append([coords[0][1],  coords[0][0]])   # endpoint a (lat, lon)
+        endpoints.append([coords[-1][1], coords[-1][0]])  # endpoint b
+
+    flat_rad = np.radians(np.array(endpoints))                     # (2*n_lines, 2)
+    R_KM = 6371.0
+    threshold_rad = threshold_km / R_KM
+
+    # Pairwise haversine: (2*n_lines, n_towns)
+    dlat = geo_rad[None, :, 0] - flat_rad[:, None, 0]
+    dlon = geo_rad[None, :, 1] - flat_rad[:, None, 1]
+    a = (np.sin(dlat / 2) ** 2 +
+         np.cos(flat_rad[:, None, 0]) * np.cos(geo_rad[None, :, 0]) *
+         np.sin(dlon / 2) ** 2)
+    d = 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))                   # radians
+
+    near = d < threshold_rad                                       # (2*n_lines, n_towns)
+    n_lines = len(line_coords)
+    # Combine endpoint a and endpoint b: line is "near town j" if either is.
+    M = (near[0::2] | near[1::2])                                  # (n_lines, n_towns)
+
+    return {'line_coords': line_coords, 'town_names': town_names, 'M': M}
+
+
+# Bucket boundaries: max-intensity threshold (concurrent ops at any nearby town).
+# Bucket 0 catches everything below the next threshold.
+_BUCKET_EDGES  = [1, 4, 10, 20]                # idle | low | mid | high | critical
+_BUCKET_COLORS = [
+    'rgba(134, 239, 172, 0.45)',               # idle — light green = "calm grid"
+    'rgba( 59, 130, 246, 0.55)',               # low (ACTUAL blue, dim)
+    'rgba( 59, 130, 246, 0.90)',               # mid (ACTUAL blue, full)
+    'rgba(255, 127,  14, 0.92)',               # high (warm transition)
+    'rgba(255,  48,  48, 0.95)',               # critical
+]
+_BUCKET_NAMES  = ['no activity', 'low (1-3)', 'mid (4-9)', 'high (10-19)', 'critical (20+)']
+
+# Single line width used by every bucket — the green idle lines and the
+# colored active lines share the same path with identical thickness, so
+# active segments fully replace the green underneath rather than leaving
+# a green outline peeking through.
+_LINE_WIDTH = 2.4
+
+
+def _bucket_of(intensity: float) -> int:
+    """Map a numeric intensity to one of 5 bucket indices."""
+    for b, edge in enumerate(_BUCKET_EDGES):
+        if intensity < edge:
+            return b
+    return len(_BUCKET_EDGES)
+
+
 @st.cache_data
-def multi_day_hours(days_back: int = 90) -> pd.DataFrame:
-    """Generate DataFrame for animation: last N days, per-town daily metrics."""
-    end_date = pd.Timestamp.now().normalize()
-    start_date = end_date - pd.Timedelta(days=days_back)
-    all_dates = pd.date_range(start=start_date, end=end_date, freq='D')
+def line_intensity_panel(end_date_str: str, days_back: int) -> dict:
+    """Build all per-frame line-bucket coordinate arrays for the animation.
 
-    dfs = []
-    for d in all_dates:
-        df_day = daily_hours(str(d.date()))
-        if not df_day.empty:
-            df_day['date'] = d.date()
-            dfs.append(df_day)
+    Resolution auto-selects: hourly for windows ≤14 days, daily for longer.
+    Each frame yields five lat/lon arrays (one per bucket) with `None`
+    separators between segments — drop straight into a go.Scattermap.
 
-    if not dfs:
-        return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True)
+    Returns:
+        {
+            'frame_labels': [...ordered ts labels...],
+            'resolution':   'hourly' | 'daily',
+            'static_lats':  [...all-line backdrop lats...],
+            'static_lons':  [...all-line backdrop lons...],
+            'frames':       {ts_label: [(lats0, lons0), ..., (lats4, lons4)]}
+        }
+    """
+    topo = load_topology()
+    if topo['n_lines'] == 0:
+        return {'frame_labels': [], 'resolution': 'hourly',
+                'static_lats': [], 'static_lons': [], 'frames': {}}
+
+    idx = line_to_nearest_towns(threshold_km=10.0)
+    line_coords = idx['line_coords']
+    M           = idx['M']                                         # (n_lines, n_towns) bool
+    town_names  = idx['town_names']
+    n_lines     = M.shape[0]
+
+    wide = load_data()['wide']
+    d_hi = pd.Timestamp(end_date_str).normalize() + pd.Timedelta(days=1)
+    d_lo = d_hi - pd.Timedelta(days=days_back)
+    sub = wide.loc[(wide.index >= d_lo) & (wide.index < d_hi)]
+    if sub.empty:
+        return {'frame_labels': [], 'resolution': 'hourly',
+                'static_lats': [], 'static_lons': [], 'frames': {}}
+
+    if days_back <= 14:
+        peak = sub.resample('1h').max()
+        resolution = 'hourly'
+        fmt = '%a %d %b · %H:00'
+    else:
+        peak = sub.resample('1D').max()
+        resolution = 'daily'
+        fmt = '%a %d %b'
+    peak.index = peak.index.strftime(fmt)
+    peak = peak.reindex(columns=town_names).fillna(0)              # align to M's column order
+
+    # (n_frames, n_towns) matrix of peak concurrency
+    P = peak.values.astype(np.float32)                             # (n_frames, n_towns)
+
+    # For each (frame, line) pair, max peak across towns where M is True.
+    # Vectorised: broadcast M against each frame's row vector and take max.
+    # Done one frame at a time to keep memory bounded; each frame is fast.
+    bucket_edges = np.array(_BUCKET_EDGES, dtype=np.float32)
+
+    static_lats = topo['lines_lat']
+    static_lons = topo['lines_lon']
+
+    frames: dict[str, list[tuple[list, list]]] = {}
+    for ts_label, row in zip(peak.index, P):
+        # Intensity per line: max( M[i,:] * row ) — but max over masked entries.
+        # M is bool; multiplying by float row gives 0 where False. Since row is
+        # non-negative (peak concurrency ≥ 0), the max is correct.
+        intensity = (M.astype(np.float32) * row).max(axis=1)       # (n_lines,)
+        # Bucket each line: 0 idle, 1 low, 2 mid, 3 high, 4 critical.
+        buckets = np.searchsorted(bucket_edges, intensity, side='right')
+
+        bucket_lats = [[] for _ in range(5)]
+        bucket_lons = [[] for _ in range(5)]
+        for li in np.where(buckets > 0)[0]:                        # skip idle
+            b = int(buckets[li])
+            for lon, lat in line_coords[li]:
+                bucket_lats[b].append(lat)
+                bucket_lons[b].append(lon)
+            bucket_lats[b].append(None)
+            bucket_lons[b].append(None)
+        frames[ts_label] = list(zip(bucket_lats, bucket_lons))
+
+    return {
+        'frame_labels': list(peak.index),
+        'resolution':   resolution,
+        'static_lats':  static_lats,
+        'static_lons':  static_lons,
+        'frames':       frames,
+    }
+
+
+@st.cache_data
+def line_buckets_for_day(date_str: str) -> list[tuple[list, list]]:
+    """Single-day version of line_intensity_panel. Returns 5 (lats, lons)
+    tuples — one per intensity bucket — using the day's peak concurrent-op
+    count per town as the line-intensity proxy.
+
+    Bucket 0 (idle) entries are not included in the returned coord arrays;
+    the static green-line backdrop already covers all idle lines.
+    """
+    idx = line_to_nearest_towns(threshold_km=10.0)
+    M           = idx['M']                                         # bool (n_lines, n_towns)
+    line_coords = idx['line_coords']
+    town_names  = idx['town_names']
+
+    wide = load_data()['wide']
+    d    = pd.Timestamp(date_str).normalize()
+    nxt  = d + pd.Timedelta(days=1)
+    day  = wide.loc[(wide.index >= d) & (wide.index < nxt)]
+
+    bucket_lats = [[] for _ in range(5)]
+    bucket_lons = [[] for _ in range(5)]
+    if day.empty or M.size == 0:
+        return list(zip(bucket_lats, bucket_lons))
+
+    peak = (day.max(axis=0)
+              .reindex(town_names).fillna(0)
+              .values.astype(np.float32))                          # (n_towns,)
+    intensity = (M.astype(np.float32) * peak).max(axis=1)          # (n_lines,)
+    edges = np.array(_BUCKET_EDGES, dtype=np.float32)
+    buckets = np.searchsorted(edges, intensity, side='right')
+
+    for li in np.where(buckets > 0)[0]:
+        b = int(buckets[li])
+        for lon, lat in line_coords[li]:
+            bucket_lats[b].append(lat)
+            bucket_lons[b].append(lon)
+        bucket_lats[b].append(None)
+        bucket_lons[b].append(None)
+    return list(zip(bucket_lats, bucket_lons))
+
+
+# ----------------------------------------------------------------------
+# Driver attribution (TreeSHAP on the production LightGBM, grouped into
+# six operator-friendly families). See src/driver_attribution.py for math.
+# ----------------------------------------------------------------------
+from driver_attribution import (                                  # noqa: E402
+    GROUP_ORDER, GROUP_DESCRIPTIONS,
+    assign_groups, decompose_day, top_features,
+)
+
+PRED_DIR = ROOT / 'data' / 'predictions'
+MODELS_DIR = ROOT / 'models'
+
+
+@st.cache_data(show_spinner=False)
+def typical_day_volume() -> int:
+    """Median town-hours-per-day across history. Used as the headline anchor
+    for 'today's events vs a typical day'."""
+    wide = load_data()['wide']
+    daily = (wide > 0).sum(axis=1).resample('D').sum() / 4   # 15-min slots → hours
+    return int(round(float(daily.median())))
+
+
+@st.cache_resource(show_spinner=False)
+def _feature_groups() -> dict[str, str]:
+    """Cached group assignment for the model's 198 features."""
+    import json
+    fcols = json.loads((MODELS_DIR / 'feature_cols.json').read_text())
+    return assign_groups(fcols)
+
+
+@st.cache_resource(show_spinner=False)
+def _calibrator_y24h():
+    """Lazily load the 24h isotonic calibrator. Returns None on any failure."""
+    try:
+        import joblib
+        return joblib.load(MODELS_DIR / 'calibrator_y_24h.joblib')
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def _features_window() -> tuple[str, str] | None:
+    """Min/max date in features.parquet, used to pick the right fallback hint."""
+    fpath = ROOT / 'data' / 'processed' / 'features.parquet'
+    if not fpath.exists():
+        return None
+    try:
+        ts = pd.read_parquet(fpath, columns=['ts'])['ts']
+        return (str(ts.min().date()), str(ts.max().date()))
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def _load_daily_summary() -> pd.DataFrame | None:
+    """Cached read of the rolled-up daily summary parquet (one row per day,
+    six group means + bias). This is the primary data source for the
+    dashboard's per-group bars; small enough to ship in git."""
+    path = PRED_DIR / 'contributions_daily_summary.parquet'
+    if not path.exists():
+        return None
+    df = pd.read_parquet(path)
+    return df
+
+
+def _attribution_from_summary_row(row: pd.Series) -> dict:
+    """Build the dashboard's `attribution` record from a single summary row.
+    Loses the per-feature top-25 table (only available when the full per-day
+    parquet is on disk), but keeps the bar-chart-level data."""
+    groups_loaded = _feature_groups()      # only used for membership lookups
+    mean_bias = float(row['mean_bias'])
+    raw_score = mean_bias + sum(float(row[g]) for g in GROUP_ORDER)
+
+    def _sigmoid(x: float) -> float:
+        import math
+        return 1.0 / (1.0 + math.exp(-x))
+
+    cal = _calibrator_y24h()
+    def _calibrate(logodds: float) -> float:
+        p = _sigmoid(logodds)
+        if cal is not None:
+            try:
+                return float(np.atleast_1d(cal.predict([p]))[0])
+            except Exception:
+                pass
+        return p
+
+    baseline_p_cal = _calibrate(mean_bias)
+    final_p_cal    = _calibrate(raw_score)
+
+    effects = []
+    for g in GROUP_ORDER:
+        dl = float(row[g])
+        # Raw-sigmoid marginal pp (signal-preserving, like the live path)
+        p_with = _sigmoid(mean_bias + dl)
+        p_base = _sigmoid(mean_bias)
+        effects.append({
+            'group':         g,
+            'delta_p_pp':    (p_with - p_base) * 100.0,
+            'delta_logodds': dl,
+            'share':         0.0,
+        })
+    effects.sort(key=lambda r: abs(r['delta_logodds']), reverse=True)
+
+    return {
+        'date':            str(row['date']),
+        'n_rows':          int(row['n_rows']),
+        'baseline_p_cal':  baseline_p_cal,
+        'final_p_cal':     final_p_cal,
+        'baseline_p_raw':  _sigmoid(mean_bias),
+        'final_p_raw':     _sigmoid(raw_score),
+        'group_effects':   effects,
+        'top_features':    None,         # not available from summary
+    }
+
+
+@st.cache_data(show_spinner=False)
+def load_today_attribution(date_str: str) -> dict | None:
+    """Load attribution for `date_str`.
+
+    Resolution order:
+      1. Full per-day contributions parquet (data/predictions/contributions_<date>.parquet)
+         — gives per-feature top-25 table for the technical expander. Local
+         only; not in git.
+      2. Rolled-up daily summary (contributions_daily_summary.parquet) — six
+         group means per day. Always present in the repo.
+      3. None — neither source has this date; UI shows fallback message.
+    """
+    full_path = PRED_DIR / f'contributions_{date_str}.parquet'
+    if full_path.exists():
+        contribs = pd.read_parquet(full_path)
+        if not contribs.empty:
+            feat_and_bias = [c for c in contribs.columns if c not in ('ts', 'town')]
+            groups = _feature_groups()
+            cal    = _calibrator_y24h()
+            cal_result = decompose_day(contribs[feat_and_bias], groups, cal)
+            raw_result = decompose_day(contribs[feat_and_bias], groups, None)
+            feat_only  = [c for c in feat_and_bias if c != 'bias']
+            top = top_features(contribs[['bias'] + feat_only], n=5)
+            return {
+                'date':            date_str,
+                'n_rows':          cal_result['n_rows'],
+                'baseline_p_cal':  cal_result['baseline_p'],
+                'final_p_cal':     cal_result['final_p'],
+                'baseline_p_raw':  raw_result['baseline_p'],
+                'final_p_raw':     raw_result['final_p'],
+                'group_effects':   raw_result['group_effects'],
+                'top_features':    top,
+            }
+
+    # Fallback: daily summary
+    summary = _load_daily_summary()
+    if summary is None:
+        return None
+    matches = summary[summary['date'] == date_str]
+    if matches.empty:
+        return None
+    return _attribution_from_summary_row(matches.iloc[0])
+
+
+@st.cache_resource(show_spinner='Indexing substations from raw ops…')
+def substation_index() -> pd.DataFrame:
+    """One-time read of all raw chunks to build a (town, locationBottleneck)
+    summary. Cached for the lifetime of the Streamlit process — recomputes
+    only when the app restarts (which is what the daily refresh triggers).
+
+    Columns:
+        town
+        locationBottleneck   transformer ID (e.g. '1000346078-T122')
+        n_ops                total operations on this bottleneck
+        n_neng_ops           operations with reason in {Netzengpass, Netzengpass I}
+        first_seen           earliest start
+        last_seen            latest start
+    """
+    raw_dir = ROOT / 'data' / 'raw' / 'shn_operations_last_2y'
+    files = sorted(raw_dir.glob('chunk_*.parquet'))
+    if not files:
+        return pd.DataFrame(columns=['town', 'locationBottleneck',
+                                      'n_ops', 'n_neng_ops',
+                                      'first_seen', 'last_seen'])
+
+    frames = []
+    for f in files:
+        df = pd.read_parquet(f, columns=['location', 'locationBottleneck',
+                                          'reason', 'start'])
+        frames.append(df)
+    raw = pd.concat(frames, ignore_index=True)
+    raw['start'] = pd.to_datetime(raw['start'], format='ISO8601')
+
+    # Match build_timeseries.py town normalisation: strip 'UW ' prefix and split on commas.
+    raw = raw[raw['location'].notna() & (raw['location'] != 'UW')]
+    raw['town_raw'] = raw['location'].str.replace(r'^UW\s+', '', regex=True).str.strip()
+    raw['town_list'] = raw['town_raw'].str.split(',').apply(
+        lambda xs: [t.replace('UW ', '').strip() for t in xs] if isinstance(xs, list) else []
+    )
+    raw = raw.explode('town_list').rename(columns={'town_list': 'town'})
+    raw = raw[raw['town'].astype(str).str.len() > 0]
+
+    raw['is_neng'] = raw['reason'].isin(['Netzengpass', 'Netzengpass I']).astype('int32')
+    raw['locationBottleneck'] = raw['locationBottleneck'].fillna('(unspecified)')
+
+    grouped = (raw.groupby(['town', 'locationBottleneck'], observed=True)
+                  .agg(n_ops=('reason', 'size'),
+                       n_neng_ops=('is_neng', 'sum'),
+                       first_seen=('start', 'min'),
+                       last_seen=('start', 'max'))
+                  .reset_index())
+    return grouped
+
+
+@st.cache_data
+def town_substation_breakdown(town: str, top_n: int = 10) -> pd.DataFrame:
+    """Top-N transformers within a town, ranked by Netzengpass operation count."""
+    idx = substation_index()
+    sub = idx[idx['town'] == town].copy()
+    if sub.empty:
+        return sub
+    sub = sub.sort_values(['n_neng_ops', 'n_ops'], ascending=False).head(top_n)
+    return sub.reset_index(drop=True)
 
 
 @st.cache_data
@@ -226,46 +695,60 @@ tab_map, tab_town = st.tabs(['Daily map', 'Town deep dive'])
 # =============================================================
 with tab_map:
     animation_mode = st.checkbox(
-        'Enable 90-Day Animation', value=False,
-        help='Animate markers over the last 90 days instead of a single day.',
+        'Enable animation', value=False,
+        help='Animate the grid heat over a recent window. The map always '
+             'shows the 110 kV topology — green lines = no redispatch, '
+             'colored lines = active redispatch by intensity.',
     )
+    # The topology overlay is now the map itself — no toggle needed.
+    # Bubbles have been removed entirely; intensity is encoded on the lines.
 
     if animation_mode:
-        threshold = st.slider('Highlight towns above (hours active)', 0, 24, 4, step=1)
-        df = multi_day_hours(90)
-        if df.empty:
-            st.error('No data in the last 90 days.')
+        anim_days = st.selectbox(
+            'Window',
+            options=[3, 7, 14, 30, 90],
+            index=1,
+            format_func=lambda d: f'Last {d} days',
+            help='Resolution auto-selects: hourly for ≤14 days, daily beyond. '
+                 'Longer windows mean more frames; the 90-day view runs at '
+                 'daily granularity to stay smooth.',
+        )
+
+        with st.spinner('Pre-computing line intensities for every frame…'):
+            panel = line_intensity_panel(str(date_hi), days_back=anim_days)
+        if not panel['frame_labels']:
+            st.error(f'No data in the last {anim_days} days.')
             st.stop()
 
+        n_frames = len(panel['frame_labels'])
         st.markdown(
             f"<div style='padding:18px 22px; border-radius:14px; "
             f"background-color:{COLOR_SURFACE}; border:1px solid {COLOR_RING}; "
             f"margin: 8px 0 18px 0;'>"
             f"<div style='font-size:0.78rem; color:{COLOR_TEXT_MUTED}; "
             f"text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px'>"
-            f"ANIMATION · Last 90 Days</div>"
-            f"<div style='font-size:1.4rem; font-family:Space Grotesk,Inter,sans-serif; "
-            f"font-weight:600; letter-spacing:-0.025em; line-height:1.2'>"
-            f"Watch congestion evolve over time</div>"
+            f"ANIMATION · Last {anim_days} days · {panel['resolution']}</div>"
+            f"<div style='font-size:1.4rem; font-family:'Inter',sans-serif; "
+            f"font-weight:400; letter-spacing:-0.025em; line-height:1.2'>"
+            f"Watch the 110 kV grid heat up and cool down</div>"
             f"<div style='color:{COLOR_TEXT_MUTED}; margin-top:6px; font-size:0.92rem'>"
-            f"Use the slider below the map to scrub through days. Towns above {threshold}h are highlighted."
+            f"<b style='color:{COLOR_TEXT}'>{n_frames}</b> {panel['resolution']} frames · "
+            f"line color encodes the highest concurrent-op count among "
+            f"substations the line connects to. "
+            f"Press play below the map; drag the slider to jump."
             f"</div></div>",
             unsafe_allow_html=True,
         )
     else:
-        # `value=` is the first-render default; `key=` makes the widget
-        # persist user changes across reruns. Pre-seeding session_state and
-        # passing `value=` is what Streamlit warns about — pick one.
-        c1, c2 = st.columns([1.2, 3])
-        with c1:
-            date = st.date_input(
-                'Date',
-                value=pd.Timestamp(date_hi).date(),
-                min_value=date_lo, max_value=date_hi,
-                key='sel_date',
-            )
-        with c2:
-            threshold = st.slider('Highlight towns above (hours active)', 0, 24, 4, step=1)
+        date = st.date_input(
+            'Date',
+            value=pd.Timestamp(date_hi).date(),
+            min_value=date_lo, max_value=date_hi,
+            key='sel_date',
+        )
+        # Threshold slider used to highlight bubbles; with line-only viz the
+        # KPI strip just reports counts at fixed thresholds (4h alert, 0h any).
+        threshold = 4
 
         df = daily_hours(str(date))
         if df.empty:
@@ -314,167 +797,387 @@ with tab_map:
         k3.metric('Most active town', f"{int(busiest['active_hours'])}h", busiest['town'])
         k4.metric('Total town-hours', f"{grid_hours}")
 
-    # Only render bubbles where something actually happened. Plotly's
-    # scatter_map normalises bubble size by the data's max — on quiet days
-    # (every town = 0 active hours) the floor value blows up to size_max,
-    # painting cream blobs everywhere. Filtering avoids the visual lie.
-    # The full 175-substation backdrop is added as a separate gray-dot trace
-    # below so the grid context stays visible.
-    df_active = df[df['active_hours'] > 0].copy()
-    df_active['size_metric'] = np.sqrt(df_active['active_hours']) + 0.6
-    df_active['display_size'] = np.where(
-        df_active['active_hours'] >= threshold,
-        df_active['size_metric'] * 1.4,
-        df_active['size_metric'] * 0.85,
-    )
-    df_active['display_opacity'] = np.where(
-        df_active['active_hours'] >= threshold, 0.95, 0.65,
-    )
-
+    # In animation mode the data shape is (ts × town × peak_concurrency); the
+    # static map uses (town × active_hours × peak_concurrency) from daily_hours.
+    # Each branch builds its own DataFrame for the figure to keep things clean.
     if animation_mode:
-        # Animation needs the full per-day per-town frame structure, but we
-        # still hide rows with zero activity — those just become empty frames.
-        anim_df = df[df['active_hours'] > 0].copy() if 'date' in df.columns else df_active
-        anim_df['size_metric'] = np.sqrt(anim_df['active_hours']) + 0.6
-        anim_df['display_size'] = anim_df['size_metric']
-        fig_map = px.scatter_map(
-            anim_df.sort_values(['date', 'active_hours']),
-            lat='lat', lon='lon',
-            size='display_size',
-            color='active_hours',
-            color_continuous_scale=HEAT_SCALE_MAP,
-            range_color=[0, 24],
-            size_max=40,
-            animation_frame='date',
-            animation_group='town',
-            hover_name='town',
-            hover_data={
-                'active_hours': True, 'n_events': True, 'peak_concurrency': True,
-                'dominant_reason': True, 'date': True,
-                'lat': False, 'lon': False, 'display_size': False, 'size_metric': False,
-                'active_15min_slots': False,
-            },
-            map_style='carto-positron',
-            zoom=7.0, center={'lat': 54.3, 'lon': 9.7},
-            height=620,
-        )
-    elif df_active.empty:
-        # Quiet day: bare map with the substation backdrop and a centred
-        # "no activity" annotation. No heat bubbles, no misleading colorscale.
-        fig_map = go.Figure(go.Scattermap(
-            lat=df['lat'], lon=df['lon'],
-            mode='markers',
-            marker=dict(size=4, color='rgba(150, 150, 150, 0.45)',
-                        allowoverlap=True),
-            hoverinfo='text',
-            text=df['town'],
-            showlegend=False,
-        ))
-        fig_map.add_annotation(
-            text='No redispatch on this day across the SHN grid.',
-            xref='paper', yref='paper', x=0.5, y=0.5, showarrow=False,
-            font=dict(size=14, color='#444'),
-            bgcolor='rgba(255, 255, 255, 0.85)', borderpad=8, borderwidth=0,
-        )
+        # Animation is now line-only: every 110 kV line is rendered, coloured
+        # by the peak concurrent-op count among nearby active towns in that
+        # frame. No bubbles. Five colour buckets (idle / low / mid / high /
+        # critical) mean we use 5 line traces; per-frame we update the
+        # coordinate arrays of the four non-idle traces, while the dim
+        # backdrop (idle bucket) stays static.
+        labels = panel['frame_labels']
+
+        # --- Build base traces ---
+        # Trace 0 — static idle backdrop covering all 110 kV lines.
+        traces = [go.Scattermap(
+            lat=panel['static_lats'], lon=panel['static_lons'],
+            mode='lines',
+            line=dict(width=_LINE_WIDTH, color=_BUCKET_COLORS[0]),
+            hoverinfo='skip', showlegend=True, name=_BUCKET_NAMES[0],
+        )]
+        # Traces 1..4 — initial frame's bucket coords.
+        first_buckets = panel['frames'][labels[0]]
+        for i in range(1, 5):
+            lats_i, lons_i = first_buckets[i]
+            traces.append(go.Scattermap(
+                lat=lats_i, lon=lons_i,
+                mode='lines',
+                line=dict(width=_LINE_WIDTH, color=_BUCKET_COLORS[i]),
+                hoverinfo='skip', showlegend=True, name=_BUCKET_NAMES[i],
+            ))
+
+        # --- Build per-frame data ---
+        plotly_frames = []
+        for label in labels:
+            buckets = panel['frames'][label]
+            frame_traces = []
+            for i in range(1, 5):
+                lats_i, lons_i = buckets[i]
+                frame_traces.append(go.Scattermap(
+                    lat=lats_i, lon=lons_i,
+                    mode='lines',
+                    line=dict(width=_LINE_WIDTH, color=_BUCKET_COLORS[i]),
+                    hoverinfo='skip', showlegend=False,
+                ))
+            plotly_frames.append(go.Frame(
+                data=frame_traces,
+                name=label,
+                traces=[1, 2, 3, 4],   # update buckets 1..4; backdrop stays
+            ))
+
+        fig_map = go.Figure(data=traces, frames=plotly_frames)
         fig_map.update_layout(
-            map=dict(style='carto-positron',
+            map=dict(style='carto-darkmatter',
                      center=dict(lat=54.3, lon=9.7), zoom=7.0),
             height=620,
+            margin=dict(l=0, r=0, t=10, b=0),
+            legend=dict(
+                orientation='h', x=0, y=1.04, xanchor='left',
+                bgcolor='rgba(0,0,0,0)',
+                font=dict(family='JetBrains Mono, monospace',
+                          size=10, color=COLOR_TEXT_MUTED),
+            ),
+            updatemenus=[{
+                'type': 'buttons',
+                'direction': 'left',
+                'showactive': False,
+                'x': 0.01, 'y': -0.05, 'xanchor': 'left', 'yanchor': 'top',
+                'pad': {'t': 0, 'r': 6},
+                'buttons': [
+                    {'label': '▶  Play', 'method': 'animate',
+                     'args': [None, {'frame': {'duration': 350, 'redraw': True},
+                                      'fromcurrent': True, 'transition': {'duration': 0}}]},
+                    {'label': '❚❚  Pause', 'method': 'animate',
+                     'args': [[None], {'frame': {'duration': 0, 'redraw': False},
+                                        'mode': 'immediate', 'transition': {'duration': 0}}]},
+                ],
+            }],
+            sliders=[{
+                'active': 0,
+                'currentvalue': {
+                    'prefix': '',
+                    'font': dict(family='JetBrains Mono, monospace',
+                                 color=COLOR_TEXT, size=11),
+                },
+                'pad': {'t': 30, 'b': 4},
+                'x': 0.05, 'len': 0.92,
+                'transition': {'duration': 0},
+                'steps': [
+                    {'method': 'animate', 'label': lbl,
+                     'args': [[lbl], {'frame': {'duration': 0, 'redraw': True},
+                                       'mode': 'immediate',
+                                       'transition': {'duration': 0}}]}
+                    for lbl in labels
+                ],
+            }],
         )
     else:
-        fig_map = px.scatter_map(
-            df_active.sort_values('active_hours'),
-            lat='lat', lon='lon',
-            size='display_size',
-            color='active_hours',
-            color_continuous_scale=HEAT_SCALE_MAP,
-            range_color=[0, 24],
-            size_max=40,
-            hover_name='town',
-            hover_data={
-                'active_hours': True, 'n_events': True, 'peak_concurrency': True,
-                'dominant_reason': True, 'lat': False, 'lon': False,
-                'display_size': False, 'size_metric': False, 'display_opacity': False,
-                'active_15min_slots': False,
-            },
-            map_style='carto-positron',
-            zoom=7.0, center={'lat': 54.3, 'lon': 9.7},
-            height=620,
-        )
-        # Substation backdrop: every town as a tiny gray dot, drawn behind the
-        # heat bubbles so the audience sees grid coverage even on calm days.
-        df_idle = df[df['active_hours'] == 0]
-        if not df_idle.empty:
-            fig_map.add_trace(go.Scattermap(
-                lat=df_idle['lat'], lon=df_idle['lon'],
+        # Static daily map: line-only intensity heat for one day. Same visual
+        # vocabulary as the animation, frozen on a single date.
+        topo = load_topology()
+        day_buckets = line_buckets_for_day(str(date))
+
+        # Build 5 line traces: idle backdrop (all lines, light green) + 4
+        # colored buckets for the day's activity.
+        traces = [go.Scattermap(
+            lat=topo['lines_lat'], lon=topo['lines_lon'],
+            mode='lines',
+            line=dict(width=_LINE_WIDTH, color=_BUCKET_COLORS[0]),
+            hoverinfo='skip', showlegend=True, name=_BUCKET_NAMES[0],
+        )]
+        for i in range(1, 5):
+            lats_i, lons_i = day_buckets[i]
+            traces.append(go.Scattermap(
+                lat=lats_i, lon=lons_i,
+                mode='lines',
+                line=dict(width=_LINE_WIDTH, color=_BUCKET_COLORS[i]),
+                hoverinfo='skip', showlegend=True, name=_BUCKET_NAMES[i],
+            ))
+        # Substation reference dots (small white) for visual context.
+        if topo['n_subs'] > 0:
+            traces.append(go.Scattermap(
+                lat=topo['subs_lat'], lon=topo['subs_lon'],
                 mode='markers',
-                marker=dict(size=4, color='rgba(150, 150, 150, 0.4)',
+                marker=dict(size=3, color='rgba(255,255,255,0.55)',
                             allowoverlap=True),
+                text=topo['subs_text'],
                 hoverinfo='text',
-                text=df_idle['town'],
-                showlegend=False,
-                name='idle_backdrop',
+                showlegend=False, name='substations',
             ))
-            # Send backdrop to the back so heat bubbles render on top.
-            fig_map.data = (fig_map.data[-1],) + fig_map.data[:-1]
 
-    if not df_active.empty and not animation_mode:
-        fig_map.update_traces(
-            marker=dict(opacity=df_active.sort_values('active_hours')['display_opacity']),
-            hovertemplate=(
-                '<b>%{hovertext}</b><br>'
-                'Active hours: <b>%{customdata[0]}h</b><br>'
-                'Distinct events: %{customdata[1]}<br>'
-                'Peak concurrent ops: %{customdata[2]}<br>'
-                'Dominant reason: %{customdata[3]}<extra></extra>'
-            ),
-            selector=dict(name=None),  # only the px-built heat trace, not the backdrop
-        )
-    elif animation_mode:
-        fig_map.update_traces(
-            hovertemplate=(
-                '<b>%{hovertext}</b><br>'
-                'Active hours: <b>%{customdata[0]}h</b><br>'
-                'Distinct events: %{customdata[1]}<br>'
-                'Peak concurrent ops: %{customdata[2]}<br>'
-                'Dominant reason: %{customdata[3]}<extra></extra>'
+        fig_map = go.Figure(data=traces)
+        fig_map.update_layout(
+            map=dict(style='carto-darkmatter',
+                     center=dict(lat=54.3, lon=9.7), zoom=7.0),
+            height=620,
+            margin=dict(l=0, r=0, t=10, b=0),
+            legend=dict(
+                orientation='h', x=0, y=1.04, xanchor='left',
+                bgcolor='rgba(0,0,0,0)',
+                font=dict(family='JetBrains Mono, monospace',
+                          size=10, color=COLOR_TEXT_MUTED),
             ),
         )
-    fig_map.update_layout(
-        margin=dict(l=0, r=0, t=10, b=0),
-        coloraxis_colorbar=dict(
-            title=dict(text='Active hours', font=dict(color=COLOR_TEXT_MUTED)),
-            tickfont=dict(color=COLOR_TEXT_MUTED),
-            ticksuffix='h',
-            tickvals=[0, 6, 12, 18, 24],
-        ),
-        transition=dict(duration=200, easing='cubic-in-out'),
-    )
 
-    # Alert halo: a soft red glow drawn behind alert towns so they pop without
-    # the heavy "outlined dot" look. Static view only — animation frames don't
-    # play nicely with extra traces, and the visual cue there is movement.
-    if not animation_mode and not df_active.empty:
-        alerts = df_active[df_active['active_hours'] >= threshold]
-        if not alerts.empty:
-            halo_px = (np.sqrt(alerts['active_hours']) + 0.6) * 14 + 10
-            fig_map.add_trace(go.Scattermap(
-                lat=alerts['lat'],
-                lon=alerts['lon'],
-                mode='markers',
-                marker=dict(
-                    size=halo_px,
-                    color='rgba(179, 0, 0, 0.18)',
-                    allowoverlap=True,
-                ),
-                hoverinfo='skip',
-                showlegend=False,
-                name='alert_halo',
-            ))
-            # Reorder so the halo is drawn first (i.e. behind the bubbles).
-            fig_map.data = (fig_map.data[-1],) + fig_map.data[:-1]
+        # If the day was completely quiet, drop a centred annotation so it
+        # doesn't look like the page failed to load.
+        if grid_hours == 0:
+            fig_map.add_annotation(
+                text='NO REDISPATCH ON THIS DAY ACROSS THE SHN GRID',
+                xref='paper', yref='paper', x=0.5, y=0.5, showarrow=False,
+                font=dict(family='JetBrains Mono, monospace',
+                          size=12, color='rgba(255,255,255,0.70)'),
+                bgcolor='rgba(42, 45, 53, 0.85)',
+                bordercolor='rgba(255,255,255,0.20)',
+                borderwidth=1, borderpad=10,
+            )
 
     st.plotly_chart(fig_map, use_container_width=True)
+
+    # ============================================================
+    # Below-the-map: "Why did today look this way?"
+    # ============================================================
+    # Retrospective attribution via TreeSHAP on the production LightGBM.
+    # Static-mode only — in animation the per-frame story IS the explanation.
+    if not animation_mode:
+        attribution = load_today_attribution(str(date))
+
+        st.markdown('### Why did today look this way?')
+
+        if attribution is None:
+            window = _features_window()
+            in_window = (
+                window is not None
+                and window[0] <= str(date) <= window[1]
+            )
+            if in_window:
+                st.info(
+                    f"Driver attribution for **{date}** isn't cached yet, but "
+                    f"the date is inside the model's feature window "
+                    f"({window[0]} → {window[1]}). Generate it with "
+                    f"`python src/v2/score_today.py --date {date}` and reload.",
+                    icon='ℹ️',
+                )
+            else:
+                w_lo, w_hi = (window if window is not None else ('?', '?'))
+                st.info(
+                    f"Driver attribution unavailable for **{date}** — this "
+                    f"date is outside the model's feature window "
+                    f"({w_lo} → {w_hi}). To extend coverage to {date}, run "
+                    f"the full refresh: "
+                    f"`python src/fetcher.py` → "
+                    f"`python src/build_timeseries.py` → "
+                    f"`python src/v2/build_features.py` → "
+                    f"`python src/v2/score_today.py --date {date}`.",
+                    icon='ℹ️',
+                )
+        else:
+            typical = max(typical_day_volume(), 1)
+            ratio   = grid_hours / typical
+            if grid_hours == 0:
+                headline_text = (
+                    f"**No redispatch was needed today** — the SHN grid "
+                    f"stayed within its limits. Below, the model attributes "
+                    f"the calm to today's grid conditions."
+                )
+            elif ratio >= 1.4:
+                headline_text = (
+                    f"**{grid_hours} town-hours of redispatch today** — "
+                    f"about **{ratio:.1f}× a typical day** ({typical}). "
+                    f"Below, the model attributes the elevated stress to "
+                    f"the day's grid conditions."
+                )
+            elif ratio <= 0.6:
+                headline_text = (
+                    f"**{grid_hours} town-hours of redispatch today** — "
+                    f"about **{ratio:.1f}× a typical day** ({typical}). "
+                    f"Below, the model attributes the calmer-than-usual "
+                    f"day to today's grid conditions."
+                )
+            else:
+                headline_text = (
+                    f"**{grid_hours} town-hours of redispatch today** "
+                    f"(typical day: {typical}). Below, the model attributes "
+                    f"how today's grid conditions tilted the system."
+                )
+            st.markdown(headline_text)
+
+            # ---- per-group bar chart -----------------------------------
+            # Display marginal effects in **odds-ratio % change** because:
+            #   (a) it's additive in log-odds space (the natural model space),
+            #   (b) it's signal-preserving at low base rates, where pp on the
+            #       calibrated-probability axis collapses to ~0,
+            #   (c) it reads naturally: "wind reduced today's stress odds by 11%".
+            effects = attribution['group_effects']                # already sorted
+
+            def _odds_pct(logodds: float) -> float:
+                """exp(logodds)-1 in percent."""
+                return (float(np.exp(logodds)) - 1.0) * 100.0
+
+            bar_rows = [(e['group'], _odds_pct(e['delta_logodds']),
+                         e['delta_logodds']) for e in effects]
+            bar_y    = [r[0] for r in bar_rows][::-1]
+            bar_x    = [r[1] for r in bar_rows][::-1]
+            bar_lo   = [r[2] for r in bar_rows][::-1]
+
+            def _bar_color(pct: float) -> str:
+                if pct >  10:   return 'rgba(255,  48,  48, 0.90)'   # strong push up
+                if pct >   2:   return 'rgba(255, 127,  14, 0.90)'   # mild push up
+                if pct < -10:   return 'rgba(134, 239, 172, 0.85)'   # strong push down
+                if pct <  -2:   return 'rgba( 59, 130, 246, 0.80)'   # mild push down
+                return 'rgba(160, 165, 175, 0.55)'                   # neutral
+
+            bar_col = [_bar_color(x) for x in bar_x]
+            bar_txt = [f"{x:+.1f}%" for x in bar_x]
+
+            fig_drv = go.Figure(go.Bar(
+                x=bar_x, y=bar_y, text=bar_txt, textposition='outside',
+                textfont=dict(family='JetBrains Mono, monospace',
+                              size=11, color=COLOR_TEXT_MUTED),
+                orientation='h',
+                marker=dict(color=bar_col),
+                customdata=bar_lo,
+                hovertemplate=(
+                    '<b>%{y}</b><br>'
+                    'effect on today\'s busyness: %{x:+.1f}%<extra></extra>'
+                ),
+            ))
+            fig_drv.add_vline(
+                x=0, line=dict(color='rgba(255,255,255,0.45)',
+                               width=1, dash='dash'),
+            )
+            fig_drv.update_layout(
+                height=70 + 50 * len(bar_y),
+                margin=dict(l=10, r=80, t=20, b=40),
+                xaxis=dict(
+                    title='← made today calmer    ·    made today busier →',
+                    ticksuffix='%', zeroline=False,
+                ),
+                yaxis=dict(automargin=True, title=None),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_drv, use_container_width=True)
+
+            # ---- per-group plain-English narrative ---------------------
+            # Translates the math into a sentence the operator can read.
+            # Story beats per group:
+            #   • What today's value of this driver was relative to typical
+            #   • Why it matters (one-line causal mechanism)
+            #   • Direction of the push, in qualitative words
+            def _strength(pct: float) -> str:
+                a = abs(pct)
+                if a > 20: return 'a lot'
+                if a > 10: return 'noticeably'
+                if a >  3: return 'a little'
+                return 'barely'
+
+            def _verb(pct: float) -> str:
+                if pct >  3:  return 'made redispatch **more likely**'
+                if pct < -3:  return 'made redispatch **less likely**'
+                return 'had **almost no effect** on today'
+
+            STORY = {
+                'Wind': (
+                    'Wind is the #1 driver of redispatch in Schleswig-Holstein. '
+                    'When wind farms generate more than the local 110 kV lines '
+                    'can carry south, the operator has to curtail them.'
+                ),
+                'Recent activity': (
+                    'Stress tends to persist — if the grid has been busy in the '
+                    'last 24 hours and last week, today is more likely to be '
+                    'busy too.'
+                ),
+                'Load & price': (
+                    'High demand and high prices generally absorb extra '
+                    'generation. Low demand or negative prices mean oversupply, '
+                    'which forces curtailment.'
+                ),
+                'Solar & temperature': (
+                    'Solar adds to renewable output. On sunny, mild days it '
+                    'piles on top of wind and pushes more generation through '
+                    'the same congested lines.'
+                ),
+                'Calendar': (
+                    'Time-of-day, weekday vs weekend, and season patterns the '
+                    'model has learned from history.'
+                ),
+                'Location': (
+                    'Some substations are inherently busier than others — '
+                    'their geography and identity priors.'
+                ),
+            }
+
+            with st.expander('What does each driver mean?', expanded=False):
+                for e in effects:
+                    pct  = _odds_pct(e['delta_logodds'])
+                    verb = _verb(pct)
+                    strength = _strength(pct)
+                    story = STORY.get(e['group'], '')
+                    if abs(pct) <= 3:
+                        line = (f"**{e['group']}** — {verb}. {story}")
+                    else:
+                        line = (f"**{e['group']}** — {verb} "
+                                f"({strength}). {story}")
+                    st.markdown(line)
+
+            # ---- technical expander: per-feature contributions ---------
+            # Only available when the full per-day parquet is on disk; the
+            # daily-summary fallback (used in CI / fresh clones) doesn't carry
+            # per-feature data.
+            tf = attribution.get('top_features')
+            if tf is not None and not tf.empty:
+                with st.expander('See the numbers (for the technical reader)',
+                                 expanded=False):
+                    st.caption(
+                        f"Top 5 individual signals ranked by how much they shifted "
+                        f"the model's prediction for {date}. Positive numbers "
+                        f"pushed the day toward stress; negative pushed it away. "
+                        f"Computed across {attribution['n_rows']:,} hour-by-town "
+                        f"cells for the day."
+                    )
+                    tf = tf.copy()
+                    tf['odds_change_pct'] = (np.exp(tf['mean_logodds']) - 1) * 100
+                    tf['direction']       = tf['mean_logodds'].apply(
+                        lambda x: '↑ toward stress' if x > 0 else '↓ away from stress'
+                    )
+                    tf = tf[['feature', 'direction', 'odds_change_pct']]
+                    tf.columns = ['Signal', 'Direction', 'Effect on busy odds']
+                    st.dataframe(
+                        tf.style.format({'Effect on busy odds': '{:+.1f}%'}),
+                        use_container_width=True, hide_index=True,
+                    )
+
+            st.caption(
+                "How this is computed: the dashboard's forecast model looks "
+                "at every substation, every hour, and assigns each grid "
+                "condition (wind, demand, recent activity, etc.) a portion "
+                "of the day's predicted busyness. We group the signals into "
+                "six families and show how much each tilted the day. "
+                "Families overlap a bit (a windy day is usually a low-price "
+                "day too), so the percentages don't add up exactly."
+            )
 
     if not animation_mode:
         st.markdown('### Top 15 most-congested substations today')
@@ -618,6 +1321,48 @@ with tab_town:
                 yaxis=dict(autorange='reversed', title=None),
             )
             st.plotly_chart(fig_heat, use_container_width=True)
+
+        # ----- Substation-level breakdown -----
+        # Towns aggregate multiple physical transformers (`locationBottleneck`).
+        # Showing them helps the audience see *which* substation in the town is
+        # actually being curtailed, instead of just "the town."
+        breakdown = town_substation_breakdown(town, top_n=10)
+        st.markdown(f'### Substations in {town}')
+        st.caption(
+            'Top transformers within this town, ranked by lifetime Netzengpass '
+            'operations. The map currently aggregates to the town centroid; '
+            'this table is the substation-level detail Anton asked about.'
+        )
+        if breakdown.empty:
+            st.info(f'No raw operations data for {town}. '
+                    f'Either the town has only Netzengpass-filtered events or '
+                    f'it sits outside the raw-chunk window.')
+        else:
+            disp = breakdown.copy()
+            disp.insert(0, '#', range(1, len(disp) + 1))
+            disp = disp.rename(columns={
+                'locationBottleneck': 'Transformer',
+                'n_ops':              'All operations',
+                'n_neng_ops':         'Netzengpass ops',
+                'first_seen':         'First seen',
+                'last_seen':          'Last seen',
+            })
+            disp['First seen'] = pd.to_datetime(disp['First seen']).dt.strftime('%Y-%m-%d')
+            disp['Last seen']  = pd.to_datetime(disp['Last seen']).dt.strftime('%Y-%m-%d')
+            disp = disp[['#', 'Transformer', 'Netzengpass ops',
+                         'All operations', 'First seen', 'Last seen']]
+            st.dataframe(
+                disp.style.background_gradient(
+                    cmap='YlOrRd', subset=['Netzengpass ops'],
+                ),
+                use_container_width=True, hide_index=True, height=380,
+            )
+            n_total = len(substation_index().query('town == @town'))
+            if n_total > len(breakdown):
+                st.caption(
+                    f'Showing top 10 of **{n_total}** transformers in this town. '
+                    f'Long tail of low-activity feeders not shown.'
+                )
 
 # ---------------- footer ----------------
 with st.expander('About this dashboard'):
