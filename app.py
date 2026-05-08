@@ -904,11 +904,20 @@ with tab_map:
                 'active': 0,
                 'currentvalue': {
                     'prefix': '',
+                    'visible': True,
+                    'xanchor': 'left',
+                    # Bigger + brighter so the active frame's date is
+                    # legible against the map. JetBrains Mono is the
+                    # numeric font of the theme.
                     'font': dict(family='JetBrains Mono, monospace',
-                                 color=COLOR_TEXT, size=11),
+                                 color=COLOR_TEXT, size=15),
+                    'offset': 8,
                 },
-                'pad': {'t': 30, 'b': 4},
-                'x': 0.05, 'len': 0.92,
+                # More headroom above the slider track so the currentvalue
+                # text doesn't collide with the map; a touch more below for
+                # the tick labels.
+                'pad': {'t': 60, 'b': 10},
+                'x': 0.12, 'len': 0.85,
                 'transition': {'duration': 0},
                 'steps': [
                     {'method': 'animate', 'label': lbl,

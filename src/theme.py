@@ -254,6 +254,11 @@ input, select, textarea, .stDateInput input,
     text-transform: uppercase !important;
     color: {TEXT_70} !important;
 }}
+/* Streamlit ≥ 1.30 ships an SVG caret inside <summary> whose <title>
+   ("arrow") leaks as readable text on some browsers — strip it and let
+   our own caret style handle the disclosure indicator. */
+[data-testid="stExpander"] summary svg title {{ display: none !important; }}
+[data-testid="stExpander"] summary svg {{ flex-shrink: 0; }}
 
 /* -------- dataframes -------- */
 [data-testid="stDataFrame"] {{
