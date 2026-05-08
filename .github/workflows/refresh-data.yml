@@ -41,14 +41,44 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Slim install — only what fetch_shn_ops + build_timeseries need
-          pip install pandas numpy pyarrow requests
+          # Adds lightgbm + scikit-learn + joblib for the scoring step;
+          # keeps install slim (no streamlit / plotly — those are dashboard-only).
+          pip install pandas numpy pyarrow requests lightgbm scikit-learn joblib
 
       - name: Fetch new SHN ops
         run: python src/fetch_shn_ops.py --max-chunks 25
 
+      - name: Refresh SMARD + weather cache
+        run: python src/fetcher.py
+        continue-on-error: true        # don't block ops/timeseries on a flaky upstream
+
       - name: Rebuild processed parquets
         run: python src/build_timeseries.py
+
+      - name: Rebuild features
+        run: python src/v2/build_features.py
+        continue-on-error: true        # train/serve schema changes shouldn't break daily refresh
+
+      - name: Score today + write contributions
+        id: score
+        run: |
+          # The most recent fully-coverable date is the latest ts in
+          # features.parquet, which already accounts for the 24h cooldown.
+          DATE=$(python - <<'PY'
+          import pandas as pd
+          ts = pd.read_parquet('data/processed/features.parquet', columns=['ts'])['ts']
+          print(ts.max().date())
+          PY
+          )
+          echo "Scoring $DATE"
+          python src/v2/score_today.py --date "$DATE" --quiet
+          echo "scored_date=$DATE" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Update daily attribution summary
+        if: steps.score.outcome == 'success'
+        run: |
+          python src/build_daily_summary.py --append-date "${{ steps.score.outputs.scored_date }}"
 
       - name: Commit and push if anything changed
         run: |
@@ -57,7 +87,9 @@ jobs:
 
           git add data/raw/shn_operations_last_2y/chunk_*.parquet \
                   data/processed/ts_15min_wide.parquet \
-                  data/processed/ts_15min_long.parquet
+                  data/processed/ts_15min_long.parquet \
+                  data/predictions/contributions_daily_summary.parquet \
+                  || true
 
           if git diff --cached --quiet; then
             echo "No data changes — nothing to commit."
