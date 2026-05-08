@@ -22,7 +22,13 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # build_timeseries.py rebuilds the 15-min activity matrix from all
+    # ~2,000 daily SHN chunks every run; on the 7 GB hosted runner the
+    # 4.3M-row pivot takes ~25 min (vs ~30s locally on a 16 GB laptop).
+    # build_features.py adds another few minutes; score + summary are
+    # fast. 60 minutes leaves headroom for genuine SHN refresh days
+    # without false-positive cancels.
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
