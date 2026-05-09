@@ -239,18 +239,63 @@ _BUCKET_COLORS = [
 ]
 _BUCKET_NAMES  = ['no activity', 'low (1-3)', 'mid (4-9)', 'high (10-19)', 'critical (20+)']
 
+# ---- Substation marker buckets ------------------------------------------
+# Static map encodes per-substation **active hours that day** (0-24) — a
+# duration metric that complements the lines' instantaneous-peak metric.
+# In animation frames the dots fall back to the line bucketing (peak
+# concurrent ops at the frame), since "active hours" doesn't make sense
+# inside a single hour-frame.
+_SUB_BUCKET_EDGES = [1, 5, 10, 16]              # 0 | 1-4 | 5-9 | 10-15 | 16-24
+_SUB_BUCKET_COLORS = [
+    'rgba(160, 165, 175, 0.55)',                # idle — dim grey
+    'rgba( 56, 189, 248, 0.95)',                # 1-4h  — cyan
+    'rgba( 59, 130, 246, 0.95)',                # 5-9h  — blue
+    'rgba(255, 127,  14, 0.95)',                # 10-15h — orange
+    'rgba(255,  48,  48, 0.95)',                # 16-24h — red
+]
+_SUB_BUCKET_NAMES = ['idle (0h)', 'low (1-4h)', 'mid (5-9h)',
+                     'high (10-15h)', 'all-day (16-24h)']
+_SUB_DOT_SIZE = 6
 
-def _legend_html() -> str:
-    """Inline HTML legend strip used above both the static and animated maps.
-    Five swatches + labels, JetBrains Mono, no Plotly dependency."""
-    swatches = ''.join(
-        f"<span style='display:inline-flex; align-items:center; "
-        f"margin-right:18px; gap:6px; font-family:JetBrains Mono,monospace; "
-        f"font-size:0.78rem; color:{COLOR_TEXT_MUTED};'>"
-        f"<span style='display:inline-block; width:18px; height:3px; "
-        f"background:{c}; border-radius:1px;'></span>{n}</span>"
-        for c, n in zip(_BUCKET_COLORS, _BUCKET_NAMES)
-    )
+
+def _bucket_of_hours(active_hours: float) -> int:
+    """Map a float in [0, 24] to one of the 5 substation-marker buckets."""
+    for b, edge in enumerate(_SUB_BUCKET_EDGES):
+        if active_hours < edge:
+            return b
+    return len(_SUB_BUCKET_EDGES)
+
+
+def _legend_html(*, swatches: list[tuple[str, str]],
+                  caption: str,
+                  swatch_kind: str = 'line') -> str:
+    """Inline HTML legend strip — used above the map for line buckets and
+    below the map for substation buckets. `swatch_kind`:
+      'line' renders a 18×3 px coloured rectangle (a stylised line segment),
+      'dot'  renders an 8 px circle (a marker).
+    """
+    if swatch_kind == 'dot':
+        swatch_style = (
+            'display:inline-block; width:9px; height:9px; '
+            'border-radius:50%; vertical-align:middle;'
+        )
+    else:
+        swatch_style = (
+            'display:inline-block; width:18px; height:3px; '
+            'background:{c}; border-radius:1px;'
+        )
+    items = []
+    for c, n in swatches:
+        if swatch_kind == 'dot':
+            chip = (f"<span style='{swatch_style} background:{c};'></span>")
+        else:
+            chip = (f"<span style='{swatch_style.format(c=c)}'></span>")
+        items.append(
+            f"<span style='display:inline-flex; align-items:center; "
+            f"margin-right:18px; gap:6px; font-family:JetBrains Mono,monospace; "
+            f"font-size:0.78rem; color:{COLOR_TEXT_MUTED};'>"
+            f"{chip}&nbsp;{n}</span>"
+        )
     return (
         f"<div style='padding:8px 12px; margin: 0 0 8px 0; "
         f"background:{COLOR_SURFACE}; border:1px solid {COLOR_RING}; "
@@ -258,9 +303,39 @@ def _legend_html() -> str:
         f"<span style='font-family:JetBrains Mono,monospace; "
         f"font-size:0.72rem; letter-spacing:0.08em; "
         f"color:{COLOR_TEXT_MUTED}; text-transform:uppercase; "
-        f"margin-right:14px;'>Concurrent operations on nearby substations</span>"
-        f"{swatches}"
+        f"margin-right:14px;'>{caption}</span>"
+        f"{''.join(items)}"
         f"</div>"
+    )
+
+
+def _line_legend_html() -> str:
+    """Top-of-map legend: line color = peak concurrency on nearby substations."""
+    return _legend_html(
+        swatches=list(zip(_BUCKET_COLORS, _BUCKET_NAMES)),
+        caption='Lines · concurrent operations on nearby substations',
+        swatch_kind='line',
+    )
+
+
+def _sub_legend_html_static() -> str:
+    """Bottom-of-map legend used in static (single-day) view: dot color =
+    active hours that day at this substation."""
+    return _legend_html(
+        swatches=list(zip(_SUB_BUCKET_COLORS, _SUB_BUCKET_NAMES)),
+        caption='Substations · active hours today',
+        swatch_kind='dot',
+    )
+
+
+def _sub_legend_html_animation() -> str:
+    """Bottom-of-map legend used in animation: dot color = peak concurrent
+    ops at the substation in this frame. Mirrors the line scheme so dot
+    and line colours align by meaning."""
+    return _legend_html(
+        swatches=list(zip(_BUCKET_COLORS, _BUCKET_NAMES)),
+        caption='Substations · peak concurrent ops at this frame',
+        swatch_kind='dot',
     )
 
 # Single line width used by every bucket — the green idle lines and the
@@ -321,13 +396,25 @@ def _line_intensity_panel_impl(d_lo: pd.Timestamp, d_hi: pd.Timestamp,
     static_lats = topo['lines_lat']
     static_lons = topo['lines_lon']
 
+    # Substation marker geometry: lat/lon for each town column in the wide
+    # matrix, in the same order as `town_names`. Towns missing from the geo
+    # parquet are skipped — animation marker arrays will index a subset.
+    geo = load_data()['geo'].drop_duplicates(subset='town').set_index('town')
+    sub_lats: list[float] = []
+    sub_lons: list[float] = []
+    sub_indices: list[int] = []                                    # column index into P
+    for ti, name in enumerate(town_names):
+        if name in geo.index:
+            sub_lats.append(float(geo.at[name, 'lat']))
+            sub_lons.append(float(geo.at[name, 'lon']))
+            sub_indices.append(ti)
+    sub_idx_arr = np.asarray(sub_indices, dtype=np.int32)
+
     frames: dict[str, list[tuple[list, list]]] = {}
+    frame_marker_colors: dict[str, list[str]] = {}
     for ts_label, row in zip(peak.index, P):
-        # Intensity per line: max( M[i,:] * row ) — but max over masked entries.
-        # M is bool; multiplying by float row gives 0 where False. Since row is
-        # non-negative (peak concurrency ≥ 0), the max is correct.
+        # ----- line intensities -----
         intensity = (M.astype(np.float32) * row).max(axis=1)       # (n_lines,)
-        # Bucket each line: 0 idle, 1 low, 2 mid, 3 high, 4 critical.
         buckets = np.searchsorted(bucket_edges, intensity, side='right')
 
         bucket_lats = [[] for _ in range(5)]
@@ -341,12 +428,25 @@ def _line_intensity_panel_impl(d_lo: pd.Timestamp, d_hi: pd.Timestamp,
             bucket_lons[b].append(None)
         frames[ts_label] = list(zip(bucket_lats, bucket_lons))
 
+        # ----- per-substation marker colors -----
+        # Same metric + bucketing as the lines (peak concurrent ops at the
+        # frame's window). Active hours doesn't translate cleanly to a
+        # single hour-frame, so we reuse the line scheme for animation.
+        sub_intensity = row[sub_idx_arr]                           # (n_subs_with_geo,)
+        sub_buckets   = np.searchsorted(bucket_edges, sub_intensity, side='right')
+        frame_marker_colors[ts_label] = [
+            _BUCKET_COLORS[int(b)] for b in sub_buckets
+        ]
+
     return {
-        'frame_labels': list(peak.index),
-        'resolution':   resolution,
-        'static_lats':  static_lats,
-        'static_lons':  static_lons,
-        'frames':       frames,
+        'frame_labels':         list(peak.index),
+        'resolution':           resolution,
+        'static_lats':          static_lats,
+        'static_lons':          static_lons,
+        'frames':               frames,
+        'sub_lats':             sub_lats,
+        'sub_lons':             sub_lons,
+        'frame_marker_colors':  frame_marker_colors,
     }
 
 
@@ -970,6 +1070,16 @@ with tab_map:
                 line=dict(width=_LINE_WIDTH, color=_BUCKET_COLORS[i]),
                 hoverinfo='skip', showlegend=True, name=_BUCKET_NAMES[i],
             ))
+        # Trace 5 — substation markers. Coords are constant; only marker
+        # colors update per frame.
+        first_marker_colors = panel['frame_marker_colors'][labels[0]]
+        traces.append(go.Scattermap(
+            lat=panel['sub_lats'], lon=panel['sub_lons'],
+            mode='markers',
+            marker=dict(size=_SUB_DOT_SIZE, color=first_marker_colors,
+                        allowoverlap=True),
+            hoverinfo='skip', showlegend=False, name='substations',
+        ))
 
         # --- Build per-frame data ---
         plotly_frames = []
@@ -984,10 +1094,23 @@ with tab_map:
                     line=dict(width=_LINE_WIDTH, color=_BUCKET_COLORS[i]),
                     hoverinfo='skip', showlegend=False,
                 ))
+            # Substation markers — only colors change per frame; coords
+            # stay the same so we re-supply them (Plotly expects the trace
+            # data to be self-contained).
+            frame_traces.append(go.Scattermap(
+                lat=panel['sub_lats'], lon=panel['sub_lons'],
+                mode='markers',
+                marker=dict(size=_SUB_DOT_SIZE,
+                            color=panel['frame_marker_colors'][label],
+                            allowoverlap=True),
+                hoverinfo='skip', showlegend=False,
+            ))
             plotly_frames.append(go.Frame(
                 data=frame_traces,
                 name=label,
-                traces=[1, 2, 3, 4],   # update buckets 1..4; backdrop stays
+                # Update line buckets 1..4 + substation markers (trace 5);
+                # the green idle line backdrop (trace 0) stays put.
+                traces=[1, 2, 3, 4, 5],
             ))
 
         fig_map = go.Figure(data=traces, frames=plotly_frames)
@@ -1094,14 +1217,28 @@ with tab_map:
                 line=dict(width=_LINE_WIDTH, color=_BUCKET_COLORS[i]),
                 hoverinfo='skip', showlegend=True, name=_BUCKET_NAMES[i],
             ))
-        # Substation reference dots (small white) for visual context.
-        if topo['n_subs'] > 0:
+        # Substation activity dots — one per SHN substation that has a
+        # geocode in towns_geo.parquet, colored by **active hours that day**
+        # (0–24) rather than line-style concurrent ops. Idle substations
+        # render as dim grey for spatial reference; busy ones light up.
+        sub_df = df.dropna(subset=['lat', 'lon']).copy()
+        if not sub_df.empty:
+            sub_df['_bucket'] = sub_df['active_hours'].apply(_bucket_of_hours)
+            sub_df['_color']  = sub_df['_bucket'].apply(
+                lambda b: _SUB_BUCKET_COLORS[int(b)]
+            )
+            sub_df['_hover']  = sub_df.apply(
+                lambda r: f"{r['town']}<br>{int(r['active_hours'])}h active",
+                axis=1,
+            )
             traces.append(go.Scattermap(
-                lat=topo['subs_lat'], lon=topo['subs_lon'],
+                lat=sub_df['lat'].tolist(),
+                lon=sub_df['lon'].tolist(),
                 mode='markers',
-                marker=dict(size=3, color='rgba(255,255,255,0.55)',
+                marker=dict(size=_SUB_DOT_SIZE,
+                            color=sub_df['_color'].tolist(),
                             allowoverlap=True),
-                text=topo['subs_text'],
+                text=sub_df['_hover'].tolist(),
                 hoverinfo='text',
                 showlegend=False, name='substations',
             ))
@@ -1132,8 +1269,14 @@ with tab_map:
 
     # Legend goes above the map so first-time users can decode the colors
     # without hovering anything.
-    st.markdown(_legend_html(), unsafe_allow_html=True)
+    st.markdown(_line_legend_html(), unsafe_allow_html=True)
     st.plotly_chart(fig_map, use_container_width=True)
+    # Substation-marker legend goes below — a separate scale is needed
+    # because dots encode different metrics depending on mode.
+    if animation_mode:
+        st.markdown(_sub_legend_html_animation(), unsafe_allow_html=True)
+    else:
+        st.markdown(_sub_legend_html_static(), unsafe_allow_html=True)
 
     # ============================================================
     # Below-the-map: "Why did today look this way?"
