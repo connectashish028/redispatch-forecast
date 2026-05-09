@@ -255,7 +255,14 @@ _SUB_BUCKET_COLORS = [
 ]
 _SUB_BUCKET_NAMES = ['idle (0h)', 'low (1-4h)', 'mid (5-9h)',
                      'high (10-15h)', 'all-day (16-24h)']
-_SUB_DOT_SIZE = 6
+
+# Active dots are large + ringed in white so they pop on top of busy line
+# corridors; idle dots stay small and dim as spatial reference.
+_SUB_DOT_ACTIVE       = 9
+_SUB_DOT_HALO         = 12                       # white halo radius (active dots)
+_SUB_DOT_IDLE         = 4
+_SUB_HALO_COLOR       = 'rgba(255,255,255,0.92)'
+_SUB_IDLE_COLOR       = 'rgba(160, 165, 175, 0.30)'   # 30% alpha — recede
 
 
 def _bucket_of_hours(active_hours: float) -> int:
@@ -411,7 +418,13 @@ def _line_intensity_panel_impl(d_lo: pd.Timestamp, d_hi: pd.Timestamp,
     sub_idx_arr = np.asarray(sub_indices, dtype=np.int32)
 
     frames: dict[str, list[tuple[list, list]]] = {}
-    frame_marker_colors: dict[str, list[str]] = {}
+    # Per-frame substation marker geometry. Idle substations are dropped
+    # entirely in animation mode (item B in the UX pass) so the eye sees
+    # only currently-firing substations. Each frame supplies (lat, lon,
+    # colors) tuples for the active subs at that frame.
+    sub_lats_arr = np.asarray(sub_lats, dtype=np.float32)
+    sub_lons_arr = np.asarray(sub_lons, dtype=np.float32)
+    frame_active_subs: dict[str, dict] = {}
     for ts_label, row in zip(peak.index, P):
         # ----- line intensities -----
         intensity = (M.astype(np.float32) * row).max(axis=1)       # (n_lines,)
@@ -428,25 +441,26 @@ def _line_intensity_panel_impl(d_lo: pd.Timestamp, d_hi: pd.Timestamp,
             bucket_lons[b].append(None)
         frames[ts_label] = list(zip(bucket_lats, bucket_lons))
 
-        # ----- per-substation marker colors -----
-        # Same metric + bucketing as the lines (peak concurrent ops at the
-        # frame's window). Active hours doesn't translate cleanly to a
-        # single hour-frame, so we reuse the line scheme for animation.
+        # ----- substation markers (active only) -----
         sub_intensity = row[sub_idx_arr]                           # (n_subs_with_geo,)
         sub_buckets   = np.searchsorted(bucket_edges, sub_intensity, side='right')
-        frame_marker_colors[ts_label] = [
-            _BUCKET_COLORS[int(b)] for b in sub_buckets
-        ]
+        active_mask   = sub_buckets > 0
+        active_idx    = np.where(active_mask)[0]
+        frame_active_subs[ts_label] = {
+            'lats':   sub_lats_arr[active_idx].tolist(),
+            'lons':   sub_lons_arr[active_idx].tolist(),
+            'colors': [_BUCKET_COLORS[int(sub_buckets[i])] for i in active_idx],
+        }
 
     return {
-        'frame_labels':         list(peak.index),
-        'resolution':           resolution,
-        'static_lats':          static_lats,
-        'static_lons':          static_lons,
-        'frames':               frames,
-        'sub_lats':             sub_lats,
-        'sub_lons':             sub_lons,
-        'frame_marker_colors':  frame_marker_colors,
+        'frame_labels':       list(peak.index),
+        'resolution':         resolution,
+        'static_lats':        static_lats,
+        'static_lons':        static_lons,
+        'frames':             frames,
+        'sub_lats':           sub_lats,        # all geocoded subs (kept for reference)
+        'sub_lons':           sub_lons,
+        'frame_active_subs':  frame_active_subs,
     }
 
 
@@ -1070,21 +1084,33 @@ with tab_map:
                 line=dict(width=_LINE_WIDTH, color=_BUCKET_COLORS[i]),
                 hoverinfo='skip', showlegend=True, name=_BUCKET_NAMES[i],
             ))
-        # Trace 5 — substation markers. Coords are constant; only marker
-        # colors update per frame.
-        first_marker_colors = panel['frame_marker_colors'][labels[0]]
+        # Traces 5 + 6 — active substation markers, halo + colored fill.
+        # Idle substations are HIDDEN in animation (item B in UX pass) so
+        # the eye sees only what's currently firing. Halo is a slightly
+        # larger white circle stacked under the colored dot — this is the
+        # standard Plotly trick because Scattermap.marker has no `line`
+        # outline property.
+        first_active = panel['frame_active_subs'][labels[0]]
         traces.append(go.Scattermap(
-            lat=panel['sub_lats'], lon=panel['sub_lons'],
+            lat=first_active['lats'], lon=first_active['lons'],
             mode='markers',
-            marker=dict(size=_SUB_DOT_SIZE, color=first_marker_colors,
+            marker=dict(size=_SUB_DOT_HALO, color=_SUB_HALO_COLOR,
                         allowoverlap=True),
-            hoverinfo='skip', showlegend=False, name='substations',
+            hoverinfo='skip', showlegend=False, name='sub_halo',
+        ))
+        traces.append(go.Scattermap(
+            lat=first_active['lats'], lon=first_active['lons'],
+            mode='markers',
+            marker=dict(size=_SUB_DOT_ACTIVE, color=first_active['colors'],
+                        allowoverlap=True),
+            hoverinfo='skip', showlegend=False, name='sub_dots',
         ))
 
         # --- Build per-frame data ---
         plotly_frames = []
         for label in labels:
             buckets = panel['frames'][label]
+            active = panel['frame_active_subs'][label]
             frame_traces = []
             for i in range(1, 5):
                 lats_i, lons_i = buckets[i]
@@ -1094,23 +1120,28 @@ with tab_map:
                     line=dict(width=_LINE_WIDTH, color=_BUCKET_COLORS[i]),
                     hoverinfo='skip', showlegend=False,
                 ))
-            # Substation markers — only colors change per frame; coords
-            # stay the same so we re-supply them (Plotly expects the trace
-            # data to be self-contained).
+            # Halo + colored dots — coords filtered to ACTIVE substations
+            # this frame. Idle subs disappear; the eye only sees firing ones.
             frame_traces.append(go.Scattermap(
-                lat=panel['sub_lats'], lon=panel['sub_lons'],
+                lat=active['lats'], lon=active['lons'],
                 mode='markers',
-                marker=dict(size=_SUB_DOT_SIZE,
-                            color=panel['frame_marker_colors'][label],
+                marker=dict(size=_SUB_DOT_HALO, color=_SUB_HALO_COLOR,
+                            allowoverlap=True),
+                hoverinfo='skip', showlegend=False,
+            ))
+            frame_traces.append(go.Scattermap(
+                lat=active['lats'], lon=active['lons'],
+                mode='markers',
+                marker=dict(size=_SUB_DOT_ACTIVE, color=active['colors'],
                             allowoverlap=True),
                 hoverinfo='skip', showlegend=False,
             ))
             plotly_frames.append(go.Frame(
                 data=frame_traces,
                 name=label,
-                # Update line buckets 1..4 + substation markers (trace 5);
-                # the green idle line backdrop (trace 0) stays put.
-                traces=[1, 2, 3, 4, 5],
+                # Update buckets 1..4 + halo (5) + colored dots (6); the
+                # green idle line backdrop (trace 0) stays put.
+                traces=[1, 2, 3, 4, 5, 6],
             ))
 
         fig_map = go.Figure(data=traces, frames=plotly_frames)
@@ -1217,31 +1248,64 @@ with tab_map:
                 line=dict(width=_LINE_WIDTH, color=_BUCKET_COLORS[i]),
                 hoverinfo='skip', showlegend=True, name=_BUCKET_NAMES[i],
             ))
-        # Substation activity dots — one per SHN substation that has a
-        # geocode in towns_geo.parquet, colored by **active hours that day**
-        # (0–24) rather than line-style concurrent ops. Idle substations
-        # render as dim grey for spatial reference; busy ones light up.
+        # Substation activity dots, split into three traces for visual
+        # hierarchy on busy days:
+        #   1. idle layer: small + dim, recedes as spatial reference (item C)
+        #   2. halo:       white halo under active dots (item A — Plotly's
+        #                  Scattermap has no marker.line, so we stack a
+        #                  larger white marker beneath the colored one)
+        #   3. active dots: bumped to 9 px, bucket color (items A + D)
         sub_df = df.dropna(subset=['lat', 'lon']).copy()
         if not sub_df.empty:
             sub_df['_bucket'] = sub_df['active_hours'].apply(_bucket_of_hours)
-            sub_df['_color']  = sub_df['_bucket'].apply(
-                lambda b: _SUB_BUCKET_COLORS[int(b)]
-            )
-            sub_df['_hover']  = sub_df.apply(
-                lambda r: f"{r['town']}<br>{int(r['active_hours'])}h active",
-                axis=1,
-            )
-            traces.append(go.Scattermap(
-                lat=sub_df['lat'].tolist(),
-                lon=sub_df['lon'].tolist(),
-                mode='markers',
-                marker=dict(size=_SUB_DOT_SIZE,
-                            color=sub_df['_color'].tolist(),
-                            allowoverlap=True),
-                text=sub_df['_hover'].tolist(),
-                hoverinfo='text',
-                showlegend=False, name='substations',
-            ))
+            idle_df   = sub_df[sub_df['_bucket'] == 0]
+            active_df = sub_df[sub_df['_bucket'] >  0].copy()
+
+            if not idle_df.empty:
+                traces.append(go.Scattermap(
+                    lat=idle_df['lat'].tolist(),
+                    lon=idle_df['lon'].tolist(),
+                    mode='markers',
+                    marker=dict(size=_SUB_DOT_IDLE,
+                                color=_SUB_IDLE_COLOR,
+                                allowoverlap=True),
+                    text=[f"{t}<br>0h active (idle)"
+                          for t in idle_df['town']],
+                    hoverinfo='text',
+                    showlegend=False, name='sub_idle',
+                ))
+
+            if not active_df.empty:
+                active_df['_color'] = active_df['_bucket'].apply(
+                    lambda b: _SUB_BUCKET_COLORS[int(b)]
+                )
+                active_df['_hover'] = active_df.apply(
+                    lambda r: f"{r['town']}<br>{int(r['active_hours'])}h active",
+                    axis=1,
+                )
+                # Halo (white) under
+                traces.append(go.Scattermap(
+                    lat=active_df['lat'].tolist(),
+                    lon=active_df['lon'].tolist(),
+                    mode='markers',
+                    marker=dict(size=_SUB_DOT_HALO,
+                                color=_SUB_HALO_COLOR,
+                                allowoverlap=True),
+                    hoverinfo='skip',
+                    showlegend=False, name='sub_halo',
+                ))
+                # Colored dots on top
+                traces.append(go.Scattermap(
+                    lat=active_df['lat'].tolist(),
+                    lon=active_df['lon'].tolist(),
+                    mode='markers',
+                    marker=dict(size=_SUB_DOT_ACTIVE,
+                                color=active_df['_color'].tolist(),
+                                allowoverlap=True),
+                    text=active_df['_hover'].tolist(),
+                    hoverinfo='text',
+                    showlegend=False, name='sub_dots',
+                ))
 
         fig_map = go.Figure(data=traces)
         fig_map.update_layout(
