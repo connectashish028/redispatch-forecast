@@ -839,12 +839,36 @@ date_hi = data['wide'].index.max().date()
 
 
 # ---------------------- header ----------------------
+# Data-freshness indicator. SHN's Connect+ API has a typical 2-3 day
+# publication lag, so dashboard data trails real-time. Surfacing this
+# on the page header avoids the "is this thing broken?" question every
+# returning visitor would otherwise ask.
+_today_utc = pd.Timestamp.utcnow().normalize().date()
+_lag_days  = max((_today_utc - date_hi).days, 0)
+if _lag_days <= 1:
+    _freshness_phrase = "live to within ~1 day"
+    _freshness_color  = '#86efac'                 # light green
+elif _lag_days <= 4:
+    _freshness_phrase = f"trailing by ~{_lag_days} days (typical SHN publishing lag)"
+    _freshness_color  = COLOR_TEXT_MUTED
+else:
+    _freshness_phrase = (f"trailing by {_lag_days} days — SHN may have paused "
+                         f"publishing; dashboard will catch up automatically")
+    _freshness_color  = '#ff7f0e'                 # warning amber
+
 st.markdown(
     "<h1 style='margin-bottom:8px'>Redispatch in Schleswig-Holstein</h1>"
-    f"<p style='color:{COLOR_TEXT_MUTED}; font-size:1.05rem; margin-top:0'>"
+    f"<p style='color:{COLOR_TEXT_MUTED}; font-size:1.05rem; margin-top:0; margin-bottom:6px'>"
     "Where and when the SHN grid has had to step in. "
     f"175 substations · {date_lo} → {date_hi}."
-    "</p>",
+    "</p>"
+    f"<p style='font-family:JetBrains Mono,monospace; font-size:0.78rem; "
+    f"color:{COLOR_TEXT_MUTED}; margin-top:0; margin-bottom:18px;'>"
+    f"<span style='color:{_freshness_color}'>● </span>"
+    f"Latest published activity: <b style='color:{COLOR_TEXT}'>"
+    f"{date_hi.strftime('%a %d %b %Y')}</b> "
+    f"<span style='color:{_freshness_color}'>· {_freshness_phrase}</span>"
+    f"</p>",
     unsafe_allow_html=True,
 )
 
