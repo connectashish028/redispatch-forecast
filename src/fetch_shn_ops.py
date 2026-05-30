@@ -76,11 +76,34 @@ def latest_local_start() -> tuple[pd.Timestamp, set[int]]:
     return latest, known_ids
 
 
-def fetch_chunk(chunk_nr: int, timeout: int = 120) -> dict:
-    """One paginated API call. Raises requests.HTTPError on 4xx/5xx."""
-    r = requests.get(API_URL, params={**API_PARAMS, 'chunkNr': chunk_nr}, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+def fetch_chunk(chunk_nr: int, timeout: int = 120,
+                 retries: int = 3) -> dict:
+    """One paginated API call with retry on transient network errors.
+    Raises requests.HTTPError on 4xx/5xx (no retry on those — they're real
+    server-side problems, not flakes). Raises requests.RequestException
+    after all retries on connection/timeout errors."""
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(API_URL,
+                              params={**API_PARAMS, 'chunkNr': chunk_nr},
+                              timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except requests.HTTPError:
+            raise                                    # don't retry on 4xx/5xx
+        except requests.RequestException as e:
+            last_exc = e
+            if attempt < retries:
+                # Exponential backoff: 5s, 10s, 20s, ...
+                wait = 5 * (2 ** (attempt - 1))
+                print(f'(retry {attempt}/{retries} after {wait}s: '
+                      f'{type(e).__name__})', end=' ', flush=True)
+                time.sleep(wait)
+            else:
+                print(f'(gave up after {retries} attempts)', end=' ', flush=True)
+    assert last_exc is not None
+    raise last_exc
 
 
 def fetch_until(latest_local: pd.Timestamp, max_chunks: int) -> pd.DataFrame:
@@ -94,8 +117,15 @@ def fetch_until(latest_local: pd.Timestamp, max_chunks: int) -> pd.DataFrame:
             print(f'HTTP error: {e}')
             sys.exit(1)
         except requests.RequestException as e:
+            # API genuinely unreachable (after retries). Don't crash the
+            # whole workflow — return what we have so far so subsequent
+            # steps (build_timeseries, scoring, summary) can run against
+            # the already-committed data.
             print(f'network error: {e}')
-            sys.exit(1)
+            print('[fetch] API unreachable; returning what we have so far '
+                  '(0 new ops). Subsequent workflow steps will continue '
+                  'with existing data.')
+            return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
         ops = j.get('operations') or []
         if not ops:

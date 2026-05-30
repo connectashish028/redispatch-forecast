@@ -71,6 +71,10 @@ app_test.py
 # Local design doc — not part of the public repo
 /THEME.md
 
+# Personal developer memory — design history, gotchas, learnings.
+# Stays local; the public face is the README.
+/memory.md
+
 # Jupyter outputs (keep notebooks lean)
 *-checkpoint.ipynb
 

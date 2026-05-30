@@ -102,7 +102,12 @@ jobs:
                       "scikit-learn>=1.6,<1.7" joblib holidays
 
       - name: Fetch new SHN ops
+        # SHN's Connect+ API has had connectivity outages on top of its
+        # publication freeze. Don't block downstream steps if the API is
+        # unreachable — build_timeseries / score_today / summary should
+        # still run against the already-committed parquets.
         run: python src/fetch_shn_ops.py --max-chunks 25
+        continue-on-error: true
 
       - name: Refresh SMARD + weather cache
         run: python src/fetcher.py

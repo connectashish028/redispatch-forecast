@@ -851,10 +851,21 @@ if _lag_days <= 1:
 elif _lag_days <= 4:
     _freshness_phrase = f"trailing by ~{_lag_days} days (typical SHN publishing lag)"
     _freshness_color  = COLOR_TEXT_MUTED
-else:
+elif _lag_days <= 13:
     _freshness_phrase = (f"trailing by {_lag_days} days — SHN may have paused "
                          f"publishing; dashboard will catch up automatically")
     _freshness_color  = '#ff7f0e'                 # warning amber
+else:
+    # >= 14 days: this is no longer "lag", it's an outage. Be explicit so
+    # visitors understand the dashboard isn't broken — SHN's Connect+ feed
+    # is. Operations themselves continue in the field; only the public
+    # publishing pipeline has stalled.
+    _freshness_phrase = (f"SHN's Connect+ feed has not published any new "
+                         f"redispatch operations in {_lag_days} days. This "
+                         f"is an upstream outage, not a dashboard issue — "
+                         f"data will resume automatically when SHN restores "
+                         f"publishing.")
+    _freshness_color  = '#ff3030'                 # critical red
 
 st.markdown(
     "<h1 style='margin-bottom:8px'>Redispatch in Schleswig-Holstein</h1>"
